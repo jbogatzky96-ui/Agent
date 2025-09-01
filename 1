@@ -1,0 +1,196 @@
+import os
+import PyPDF2
+import docx
+import random
+import json
+from datetime import datetime
+
+class ExamTrainerAgent:
+    def __init__(self, materials_dir, exams_dir):
+        self.materials_dir = materials_dir
+        self.exams_dir = exams_dir
+        self.study_materials = {}
+        self.past_exams = {}
+        self.performance_history = []
+        
+    def load_all_documents(self):
+        """Lädt alle Studienmaterialien und Altklausuren"""
+        print("Lade Studienmaterialien...")
+        self._load_documents_from_dir(self.materials_dir, self.study_materials)
+        
+        print("Lade Altklausuren...")
+        self._load_documents_from_dir(self.exams_dir, self.past_exams)
+        
+        print(f"Geladen: {len(self.study_materials)} Studienmaterialien, {len(self.past_exams)} Klausuren")
+    
+    def _load_documents_from_dir(self, directory, target_dict):
+        """Hilfsfunktion zum Laden von Dokumenten aus einem Verzeichnis"""
+        for filename in os.listdir(directory):
+            filepath = os.path.join(directory, filename)
+            if filename.endswith('.pdf'):
+                target_dict[filename] = self._parse_pdf(filepath)
+            elif filename.endswith('.docx'):
+                target_dict[filename] = self._parse_docx(filepath)
+            elif filename.endswith('.txt'):
+                target_dict[filename] = self._parse_txt(filepath)
+    
+    def _parse_pdf(self, filepath):
+        """Extrahiert Text aus PDF-Dateien"""
+        text = ""
+        with open(filepath, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+        return text
+        
+    def _parse_docx(self, filepath):
+        """Extrahiert Text aus DOCX-Dateien"""
+        doc = docx.Document(filepath)
+        text = ""
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+        return text
+        
+    def _parse_txt(self, filepath):
+        """Liest Text aus TXT-Dateien"""
+        with open(filepath, 'r', encoding='utf-8') as file:
+            return file.read()
+    
+    def generate_question(self, question_type="multiple_choice"):
+        """Generiert eine Frage basierend auf den Studienmaterialien"""
+        # Wähle ein zufälliges Dokument und einen Abschnitt
+        doc_name = random.choice(list(self.study_materials.keys()))
+        content = self.study_materials[doc_name]
+        
+        # Teile den Inhalt in Abschnitte (vereinfacht)
+        sections = content.split('\n\n')
+        relevant_section = random.choice(sections)
+        
+        if question_type == "multiple_choice":
+            return self._generate_multiple_choice(relevant_section, doc_name)
+        else:
+            return self._generate_open_question(relevant_section, doc_name)
+    
+    def _generate_multiple_choice(self, content, source):
+        """Generiert eine Multiple-Choice-Frage"""
+        # Vereinfachte Implementierung - in der Praxis würde man NLP verwenden
+        sentences = [s for s in content.split('.') if len(s) > 20]
+        if not sentences:
+            return self._generate_open_question(content, source)
+        
+        question_base = random.choice(sentences)
+        question = question_base.replace("ist", "ist ________")
+        
+        # Generiere Antwortoptionen (vereinfacht)
+        correct_answer = question_base.split()[-3:] if len(question_base.split()) >= 3 else ["Richtige", "Antwort"]
+        correct_answer = " ".join(correct_answer)
+        
+        options = [
+            correct_answer,
+            "Falsche Antwort 1",
+            "Falsche Antwort 2", 
+            "Falsche Antwort 3"
+        ]
+        random.shuffle(options)
+        
+        return {
+            "type": "multiple_choice",
+            "question": question,
+            "options": options,
+            "correct_answer": correct_answer,
+            "source": source
+        }
+    
+    def _generate_open_question(self, content, source):
+        """Generiert eine offene Frage"""
+        sentences = [s for s in content.split('.') if len(s) > 20]
+        if not sentences:
+            return None
+        
+        question_base = random.choice(sentences)
+        question = f"Erklären Sie: {question_base}"
+        
+        return {
+            "type": "open_ended",
+            "question": question,
+            "source": source
+        }
+    
+    def simulate_exam(self, num_questions=10, time_limit=30):
+        """Simuliert eine Klausur mit Fragen aus den Materialien"""
+        questions = []
+        for _ in range(num_questions):
+            q_type = random.choice(["multiple_choice", "open_ended"])
+            question = self.generate_question(q_type)
+            if question:
+                questions.append(question)
+        
+        return {
+            "exam_id": f"exam_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "questions": questions,
+            "time_limit": time_limit  # in Minuten
+        }
+    
+    def check_answer(self, question, user_answer):
+        """Überprüft eine gegebene Antwort (vereinfacht)"""
+        if question["type"] == "multiple_choice":
+            correct = user_answer.strip().lower() == question["correct_answer"].lower()
+            return {
+                "correct": correct,
+                "correct_answer": question["correct_answer"]
+            }
+        else:
+            # Für offene Fragen: einfache Keyword-Überprüfung
+            keywords = question["question"].lower().split()[:5]  # Erste 5 Wörter als Keywords
+            user_text = user_answer.lower()
+            matches = sum(1 for keyword in keywords if keyword in user_text)
+            score = matches / len(keywords) if keywords else 0
+            
+            return {
+                "score": score,
+                "feedback": f"Sie haben {matches} von {len(keywords)} Schlüsselbegriffen erwähnt." if keywords else "Schwierigkeit bei der automatischen Bewertung."
+            }
+    
+    def track_performance(self, exam_results):
+        """Speichert die Leistung für spätere Analyse"""
+        self.performance_history.append({
+            "timestamp": datetime.now().isoformat(),
+            "results": exam_results
+        })
+    
+    def get_study_recommendations(self):
+        """Gibt Empfehlungen basierend auf der Leistungshistorie"""
+        if not self.performance_history:
+            return "Noch keine Leistungsdaten verfügbar. Bitte absolvieren Sie zunächst einige Tests."
+        
+        # Einfache Empfehlungslogik
+        weak_areas = []
+        for record in self.performance_history[-3:]:  # Letzte 3 Tests
+            if "score" in record["results"] and record["results"]["score"] < 0.7:
+                weak_areas.append(record["results"].get("topic", "Unbekanntes Thema"))
+        
+        if weak_areas:
+            return f"Konzentrieren Sie sich auf: {', '.join(set(weak_areas))}"
+        else:
+            return "Gute Leistung! Sie sind auf dem richtigen Weg."
+
+# Beispiel für die Verwendung
+if __name__ == "__main__":
+    # Initialisiere den Agenten
+    trainer = ExamTrainerAgent("studienmaterialien/", "altklausuren/")
+    trainer.load_all_documents()
+    
+    # Generiere eine Beispiel-Frage
+    question = trainer.generate_question()
+    print("Frage:", question["question"])
+    if question["type"] == "multiple_choice":
+        for i, option in enumerate(question["options"]):
+            print(f"{i+1}. {option}")
+    
+    # Simuliere eine Klausur
+    exam = trainer.simulate_exam(num_questions=5)
+    print(f"\nSimulierte Klausur mit {len(exam['questions'])} Fragen")
+    
+    # Zeige Lernempfehlungen an
+    recommendations = trainer.get_study_recommendations()
+    print(f"\nLernempfehlungen: {recommendations}")
