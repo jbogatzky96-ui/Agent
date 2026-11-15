@@ -45,7 +45,7 @@ class UIConfig:
     opacity: float = 0.93
     font_size: int = 11
     width: int = 480
-    height: int = 380
+    height: int = 600
     hotkey_answer: str = "ctrl+alt+a"
     hotkey_toggle: str = "ctrl+alt+h"
 

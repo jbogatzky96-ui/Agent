@@ -10,8 +10,10 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QSizeGrip,
+    QSplitter,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -21,14 +23,21 @@ from .config import UIConfig
 from .llm import AnswerStats
 
 STATUS_COLORS = {"listening": "#3fb950", "answering": "#58a6ff", "error": "#f85149"}
+SPEAKER_COLORS = ["#79c0ff", "#d2a8ff"]
+MAX_TRANSCRIPT_LINES = 300
 
 STYLE = """
 #panel { background: rgba(22, 24, 29, 238); border: 1px solid rgba(255,255,255,30); border-radius: 12px; }
 QLabel { color: #e6edf3; }
 #title { color: #8b949e; font-weight: 600; }
-#hint, #meta, #live { color: #8b949e; }
+#hint, #meta, #section { color: #8b949e; }
+#section { font-size: 9pt; text-transform: uppercase; }
 #question { color: #ffd479; font-weight: 600; }
 QTextBrowser { background: transparent; border: none; color: #e6edf3; }
+#transcript { background: rgba(255,255,255,8); border-radius: 6px; padding: 4px; }
+QSplitter::handle { background: rgba(255,255,255,25); height: 1px; }
+QProgressBar { background: rgba(255,255,255,20); border: none; border-radius: 3px; max-height: 6px; }
+QProgressBar::chunk { background: #3fb950; border-radius: 3px; }
 QPushButton#close { background: transparent; color: #8b949e; border: none; font-size: 15px; padding: 0 4px; }
 QPushButton#close:hover { color: #f85149; }
 """
@@ -43,6 +52,8 @@ class QtSink(QObject):
     done_sig = pyqtSignal(object, str)
     utterance_sig = pyqtSignal(str, str)
     partial_sig = pyqtSignal(str, str)
+    detection_sig = pyqtSignal(str, bool, str)
+    levels_sig = pyqtSignal(dict)
     toggle_sig = pyqtSignal()
 
     def status(self, state: str, detail: str = "") -> None:
@@ -63,6 +74,12 @@ class QtSink(QObject):
     def partial(self, speaker: str, text: str) -> None:
         self.partial_sig.emit(speaker, text)
 
+    def detection(self, text: str, is_question: bool, question: str) -> None:
+        self.detection_sig.emit(text, is_question, question)
+
+    def levels(self, levels: dict[str, float]) -> None:
+        self.levels_sig.emit(levels)
+
 
 class Overlay(QWidget):
     def __init__(self, cfg: UIConfig, sink: QtSink) -> None:
@@ -70,7 +87,10 @@ class Overlay(QWidget):
         self.cfg = cfg
         self._answer = ""
         self._drag_from: QPoint | None = None
-        self._recent: list[str] = []
+        self._lines: list[str] = []
+        self._partials: dict[str, str] = {}
+        self._speaker_colors: dict[str, str] = {}
+        self._meters: dict[str, QProgressBar] = {}
 
         self.setWindowTitle("Call Assistant")
         self.setWindowFlags(
@@ -79,8 +99,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowOpacity(cfg.opacity)
         self.resize(cfg.width, cfg.height)
-        font = QFont("Segoe UI", cfg.font_size)
-        self.setFont(font)
+        self.setFont(QFont("Segoe UI", cfg.font_size))
         self.setStyleSheet(STYLE)
 
         panel = QFrame(objectName="panel")
@@ -105,21 +124,34 @@ class Overlay(QWidget):
         header.addWidget(close)
         layout.addLayout(header)
 
+        self.meter_row = QHBoxLayout()
+        self.meter_row.setSpacing(8)
+        layout.addLayout(self.meter_row)
+
+        # Answer on top, full transcript below; the user can drag the divider.
+        answer_box = QWidget()
+        answer_layout = QVBoxLayout(answer_box)
+        answer_layout.setContentsMargins(0, 0, 0, 0)
         self.question_label = QLabel(
             f"Warte auf eine Frage … ({cfg.hotkey_answer.upper()} = jetzt antworten)", objectName="question"
         )
         self.question_label.setWordWrap(True)
-        layout.addWidget(self.question_label)
-
         self.answer_view = QTextBrowser()
-        self.answer_view.setOpenExternalLinks(False)
-        self.answer_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        layout.addWidget(self.answer_view, 1)
+        answer_layout.addWidget(self.question_label)
+        answer_layout.addWidget(self.answer_view, 1)
 
-        self.live_label = QLabel("", objectName="live")
-        self.live_label.setWordWrap(True)
-        self.live_label.setMaximumHeight(int(cfg.font_size * 4.2))
-        layout.addWidget(self.live_label)
+        transcript_box = QWidget()
+        transcript_layout = QVBoxLayout(transcript_box)
+        transcript_layout.setContentsMargins(0, 4, 0, 0)
+        transcript_layout.addWidget(QLabel("Transkript", objectName="section"))
+        self.transcript_view = QTextBrowser(objectName="transcript")
+        transcript_layout.addWidget(self.transcript_view, 1)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(answer_box)
+        splitter.addWidget(transcript_box)
+        splitter.setSizes([cfg.height * 55 // 100, cfg.height * 45 // 100])
+        layout.addWidget(splitter, 1)
 
         footer = QHBoxLayout()
         self.meta_label = QLabel(
@@ -135,8 +167,29 @@ class Overlay(QWidget):
         sink.done_sig.connect(self.on_done)
         sink.utterance_sig.connect(self.on_utterance)
         sink.partial_sig.connect(self.on_partial)
+        sink.detection_sig.connect(self.on_detection)
+        sink.levels_sig.connect(self.on_levels)
         sink.toggle_sig.connect(lambda: self.setVisible(not self.isVisible()))
         self.on_status("listening", "Starte …")
+
+    # ---- helpers -------------------------------------------------------------------------------
+
+    def _color(self, speaker: str) -> str:
+        if speaker not in self._speaker_colors:
+            self._speaker_colors[speaker] = SPEAKER_COLORS[len(self._speaker_colors) % len(SPEAKER_COLORS)]
+        return self._speaker_colors[speaker]
+
+    def _render_transcript(self) -> None:
+        bar = self.transcript_view.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4  # don't yank the view while the user scrolls back
+        partial = [
+            f'<span style="color:{self._color(s)}">{escape(s)}:</span> <i style="color:#8b949e">{escape(t)} …</i>'
+            for s, t in self._partials.items()
+            if t
+        ]
+        self.transcript_view.setHtml("<br>".join(self._lines + partial))
+        if at_bottom:
+            bar.setValue(bar.maximum())
 
     # ---- slots ---------------------------------------------------------------------------------
 
@@ -167,12 +220,35 @@ class Overlay(QWidget):
         self.meta_label.setText(f"{stats.model} · erste Worte nach {first} · {stats.output_tokens} Tokens")
 
     def on_utterance(self, speaker: str, text: str) -> None:
-        self._recent = (self._recent + [f"<b>{escape(speaker)}:</b> {escape(text)}"])[-2:]
-        self.live_label.setText("<br>".join(self._recent))
+        self._partials.pop(speaker, None)
+        self._lines.append(f'<span style="color:{self._color(speaker)}"><b>{escape(speaker)}:</b></span> {escape(text)}')
+        del self._lines[:-MAX_TRANSCRIPT_LINES]
+        self._render_transcript()
 
     def on_partial(self, speaker: str, text: str) -> None:
-        lines = self._recent[-1:] + [f"<b>{escape(speaker)}:</b> <i>{escape(text)}</i>"]
-        self.live_label.setText("<br>".join(lines))
+        self._partials[speaker] = text
+        self._render_transcript()
+
+    def on_detection(self, text: str, is_question: bool, question: str) -> None:
+        if is_question:
+            self._lines.append(f'<span style="color:#ffd479">&nbsp;&nbsp;↳ Frage erkannt: {escape(question)}</span>')
+            self._render_transcript()
+        else:
+            self.state_label.setText("Höre zu · letzter Satz: keine Frage")
+
+    def on_levels(self, levels: dict) -> None:
+        for name, level in levels.items():
+            if name not in self._meters:
+                label = QLabel(name, objectName="meta")
+                bar = QProgressBar()
+                bar.setRange(0, 100)
+                bar.setTextVisible(False)
+                bar.setStyleSheet(f"QProgressBar::chunk {{ background: {self._color(name)}; }}")
+                self.meter_row.addWidget(label)
+                self.meter_row.addWidget(bar, 1)
+                self._meters[name] = bar
+            # Speech RMS is typically 0.01-0.2; a square-root curve makes quiet input visible.
+            self._meters[name].setValue(min(100, int((level ** 0.5) * 220)))
 
     # ---- dragging ------------------------------------------------------------------------------
 

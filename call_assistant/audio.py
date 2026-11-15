@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -105,6 +106,13 @@ class AudioCapture:
         self._queue = queue
         self._chunk_frames = max(1, device.sample_rate * chunk_ms // 1000)
         self._stream = None
+        self._level = 0.0
+        self._level_ts = 0.0
+
+    @property
+    def level(self) -> float:
+        """RMS of the latest chunk, 0..1. Loopback delivers no callbacks while nothing plays, hence the timeout."""
+        return self._level if time.monotonic() - self._level_ts < 0.5 else 0.0
 
     def _push(self, data: bytes) -> None:
         if self._queue.full():  # STT is behind or reconnecting: drop the oldest audio, keep latency low
@@ -119,6 +127,9 @@ class AudioCapture:
         samples = np.frombuffer(in_data, dtype=np.int16)
         if self.device.channels > 1:
             samples = samples.reshape(-1, self.device.channels).mean(axis=1).astype(np.int16)
+        if samples.size:
+            self._level = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) / 32768.0
+            self._level_ts = time.monotonic()
         self._loop.call_soon_threadsafe(self._push, samples.tobytes())
         return (None, pyaudio.paContinue)
 

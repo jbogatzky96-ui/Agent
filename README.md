@@ -53,7 +53,10 @@ Then live:
 run.bat                 # overlay window
 run.bat --no-ui         # terminal only
 run.bat --list-devices  # if the wrong headset/mic is picked up
+run.bat --log-file debug.log  # also write everything to a file (contains the transcript!)
 ```
+
+The overlay shows a level bar per audio source. If the bar for "Gegenüber" stays flat while someone talks, the app is listening to the wrong output device: check the Windows default playback device or set `loopback_device` in `config.toml`. Under "Transkript" you see everything that was recognized, and a yellow "Frage erkannt" line whenever a question triggered an answer. The terminal window logs the same plus every detection decision.
 
 | Hotkey | Action |
 |---|---|

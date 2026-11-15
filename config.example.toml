@@ -37,6 +37,6 @@ min_question_words = 3
 opacity = 0.93
 font_size = 11
 width = 480
-height = 380
+height = 600
 hotkey_answer = "ctrl+alt+a"
 hotkey_toggle = "ctrl+alt+h"

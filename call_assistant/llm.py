@@ -28,8 +28,9 @@ Decide whether the LATEST utterance by "{them}" contains a genuine question or r
 a decision or a number that the user may need to answer or contribute to right now.
 
 Count as NOT a question: greetings and small talk ("Wie geht's?"), technical checks ("Hört ihr mich?", \
-"Sieht man meinen Bildschirm?"), rhetorical questions the speaker answers themselves, questions clearly addressed \
-to another named person, and fragments without a recognizable question.
+"Sieht man meinen Bildschirm?"), rhetorical questions the speaker answers themselves in the same utterance, \
+and fragments without a recognizable question.{addressee_rule} When in doubt, answer true: a missed question \
+costs the user more than an unnecessary suggestion.
 
 If it is a question, write `question` as a self-contained reformulation in {language}: resolve references \
 ("das", "die Zahl von vorhin") using the earlier turns, and keep it short. Otherwise leave `question` empty."""
@@ -74,7 +75,11 @@ class Assistant:
         self.cfg = cfg
         self.client = client or anthropic.AsyncAnthropic()
         fmt = dict(me=cfg.me_label, them=cfg.them_label, language=cfg.answer_language, name_hint=_name_hint(cfg))
-        self._detector_system = DETECTOR_SYSTEM.format(**fmt)
+        addressee = (
+            f' Also NOT a question: one clearly addressed to a named person other than {cfg.my_name}.'
+            if cfg.my_name else ''
+        )
+        self._detector_system = DETECTOR_SYSTEM.format(**fmt, addressee_rule=addressee)
         # Instructions + context are identical on every request, so they form a cacheable prefix.
         self._answer_system: list[dict] = [{"type": "text", "text": ANSWER_SYSTEM.format(**fmt)}]
         if context_text:

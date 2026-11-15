@@ -170,3 +170,49 @@ def test_deepgram_stream_against_fake_server(monkeypatch):
     assert received["auth"] == "Token secret"
     assert received["audio"] == b"\x01\x02" * 100
     assert received["keepalive"] >= 2
+
+
+def test_engine_reports_detection_results_and_errors(tmp_path):
+    script = tmp_path / "sim.txt"
+    script.write_text("them: Das ist eine Aussage ohne Frage\nthem: Was kostet das genau?\n", encoding="utf-8")
+    fake, sink = FakeAssistant(), RecordingSink()
+    asyncio.run(Engine(AppConfig(), sink, fake, simulate=script).run())
+    detections = [args for name, args in sink.events if name == "detection"]
+    assert detections == [
+        ("Das ist eine Aussage ohne Frage", False, ""),
+        ("Was kostet das genau?", True, "Was kostet das genau?"),
+    ]
+
+    class Broken(FakeAssistant):
+        async def check_question(self, recent):
+            raise ValueError("boom")
+
+    sink = RecordingSink()
+    asyncio.run(Engine(AppConfig(), sink, Broken(), simulate=script).run())
+    assert any(name == "status" and args[0] == "error" for name, args in sink.events)
+
+
+def test_detector_only_filters_other_addressees_when_name_is_known():
+    assert "named person" not in Assistant(AppConfig(), "", client=object())._detector_system
+    cfg = AppConfig()
+    cfg.my_name = "Jonas"
+    assert "other than Jonas" in Assistant(cfg, "", client=object())._detector_system
+
+
+def test_audio_level_meter_and_decay(monkeypatch):
+    import numpy as np
+
+    from call_assistant import audio
+
+    class FakePyAudio:
+        paContinue = 0
+
+    monkeypatch.setattr(audio, "_pyaudio", lambda: FakePyAudio)
+    loop = asyncio.new_event_loop()
+    cap = audio.AudioCapture(None, audio.Device(0, "x", 2, 16000), loop, asyncio.Queue(maxsize=2), 50)
+    stereo = (np.ones(1600, dtype=np.int16) * 3277).tobytes()  # 800 frames x 2 ch at ~0.1 full scale
+    cap._callback(stereo, 800, None, 0)
+    assert 0.09 < cap.level < 0.11
+    monkeypatch.setattr(audio.time, "monotonic", lambda: 1e12)
+    assert cap.level == 0.0
+    loop.close()

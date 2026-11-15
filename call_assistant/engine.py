@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-import anthropic
 
 from .config import AppConfig
 from .llm import AnswerStats, Assistant
@@ -25,6 +24,8 @@ class UiSink(Protocol):
     def answer_done(self, stats: AnswerStats | None, error: str = "") -> None: ...
     def utterance(self, speaker: str, text: str) -> None: ...
     def partial(self, speaker: str, text: str) -> None: ...
+    def detection(self, text: str, is_question: bool, question: str) -> None: ...
+    def levels(self, levels: dict[str, float]) -> None: ...
 
 
 class Engine:
@@ -104,11 +105,27 @@ class Engine:
             for capture in captures:
                 capture.start()
             self.ui.status("listening", "Höre zu")
-            await asyncio.gather(*(s.run() for s in self._streams))
+            labels = [speaker for speaker, _ in sources]
+            await asyncio.gather(*(s.run() for s in self._streams), self._meter(dict(zip(labels, captures))))
         finally:
             for capture in captures:
                 capture.stop()
             pa.terminate()
+
+    async def _meter(self, captures: dict) -> None:
+        silent_since = {name: 0.0 for name in captures}
+        loop = asyncio.get_running_loop()
+        while True:
+            levels = {name: cap.level for name, cap in captures.items()}
+            self.ui.levels(levels)
+            now = loop.time()
+            for name, level in levels.items():
+                if level > 0.002:
+                    silent_since[name] = now
+                elif silent_since[name] and now - silent_since[name] > 30:
+                    log.warning("No audio from '%s' for 30 s. Wrong device? Try --list-devices.", name)
+                    silent_since[name] = now
+            await asyncio.sleep(0.2)
 
     async def _run_simulation(self, path: Path) -> None:
         """Replay a scripted conversation; lets you test detection and answers without audio or Deepgram.
@@ -140,6 +157,7 @@ class Engine:
 
     def _on_utterance(self, speaker: str, text: str) -> None:
         turn = self.transcript.add(speaker, text)
+        log.info("%s: %s", speaker, turn.text)
         self.ui.utterance(speaker, turn.text)
         if (
             speaker == self.cfg.them_label
@@ -153,14 +171,19 @@ class Engine:
         try:
             recent = self.transcript.render(last_n=self.cfg.llm.detector_window_turns)
             result = await self.assistant.check_question(recent)
-        except anthropic.APIError as exc:
-            log.warning("Question detection failed: %s", exc)
+        except Exception as exc:  # never let a failed check silently swallow questions
+            log.error("Question detection failed: %s", exc)
+            self.ui.status("error", f"Fragenerkennung fehlgeschlagen: {type(exc).__name__}")
             return
         finally:
             self._pending_detections -= 1
-        if result is None or not result.is_question:
+        is_question = bool(result and result.is_question)
+        log.info("Detection: %s -> %s", turn.text, f"QUESTION: {result.question}" if is_question else "no question")
+        self.ui.detection(turn.text, is_question, result.question if is_question else "")
+        if not is_question:
             return
         if turn.id <= self._answered_turn_id:  # a newer question is already being answered
+            log.info("Skipped: a newer question is already being answered")
             return
         self._answered_turn_id = turn.id
         self._start_answer(result.question or turn.text, "auto")
@@ -174,6 +197,7 @@ class Engine:
     def _start_answer(self, question: str | None, trigger: str) -> None:
         if self._answer_task and not self._answer_task.done():
             self._answer_task.cancel()
+        log.info("Answering (%s): %s", trigger, question or "most recent open question")
         self.ui.question(question or "(Hotkey: letzte offene Frage)", trigger)
         self._answer_task = asyncio.get_running_loop().create_task(self._answer(question, trigger))
 
@@ -196,8 +220,8 @@ class Engine:
                 )
         except asyncio.CancelledError:
             raise
-        except anthropic.APIError as exc:
+        except Exception as exc:
             log.error("Answer failed: %s", exc)
-            self.ui.answer_done(None, error=f"API-Fehler: {exc}")
+            self.ui.answer_done(None, error=f"Fehler: {exc}")
         finally:
             self.ui.status("listening", "Höre zu")
