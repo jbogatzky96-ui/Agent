@@ -12,14 +12,17 @@ No bot joins the call. The app records what your headset plays (WASAPI loopback)
 
 ## Setup (Windows 10/11)
 
-Requires Python 3.11 or newer.
+Requires Python 3.11 or newer ([python.org](https://www.python.org/downloads/), tick "Add python.exe to PATH").
+
+Double-click `setup.bat`. It creates a virtual environment, installs everything and copies the templates (`.env`, `config.toml`, `context/`). Then put your keys into `.env`.
+
+Manual alternative:
 
 ```powershell
-git clone <repo> && cd Agent
-py -3.12 -m venv .venv
+py -3 -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env            # add ANTHROPIC_API_KEY and DEEPGRAM_API_KEY
+copy .env.example .env
 copy config.example.toml config.toml
 xcopy /E /I context.example context
 ```
@@ -41,15 +44,15 @@ The context is sent with every answer and cached for an hour, so repeated answer
 First test without audio or Deepgram (only uses the Anthropic API):
 
 ```powershell
-python -m call_assistant --simulate examples/simulation.txt --context context.example --no-ui
+run.bat --simulate examples\simulation.txt --context context.example --no-ui
 ```
 
 Then live:
 
 ```powershell
-python -m call_assistant                 # overlay window
-python -m call_assistant --no-ui         # terminal only
-python -m call_assistant --list-devices  # if the wrong headset/mic is picked up
+run.bat                 # overlay window
+run.bat --no-ui         # terminal only
+run.bat --list-devices  # if the wrong headset/mic is picked up
 ```
 
 | Hotkey | Action |
