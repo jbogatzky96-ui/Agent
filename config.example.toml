@@ -1,0 +1,42 @@
+# Copy to config.toml and adjust. Every key is optional; missing keys use the defaults shown here.
+
+answer_language = "Deutsch"
+my_name = ""              # your name, helps detect questions addressed to you
+me_label = "Ich"
+them_label = "Gegenüber"
+context_dir = "context"   # briefing.md + PDFs/DOCX/MD/TXT for the call
+save_transcript = false   # only enable with the other participants' consent
+transcript_dir = "transcripts"
+
+[audio]
+capture_mic = true        # transcribe yourself too (better context, doubles Deepgram minutes)
+loopback_device = ""      # name fragment from --list-devices; empty = Windows default output
+mic_device = ""           # name fragment; empty = Windows default microphone
+chunk_ms = 50
+
+[deepgram]
+model = "nova-3"
+language = "de"
+endpointing_ms = 300      # pause that ends a sentence
+utterance_end_ms = 1000
+keyterms = []             # e.g. ["EBITDA", "Müller GmbH", "SAP S/4HANA"]
+
+[llm]
+answer_model = "claude-opus-5-5"
+answer_effort = "low"     # low = fastest; medium/high = more thorough but slower
+answer_max_tokens = 4000
+use_refusal_fallback = true
+answer_transcript_chars = 60000
+detection_enabled = true
+detector_model = "claude-haiku-5-5"
+detector_effort = "low"
+detector_window_turns = 8
+min_question_words = 3
+
+[ui]
+opacity = 0.93
+font_size = 11
+width = 480
+height = 380
+hotkey_answer = "ctrl+alt+a"
+hotkey_toggle = "ctrl+alt+h"
