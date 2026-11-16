@@ -7,6 +7,9 @@ them_label = "Gegenüber"
 context_dir = "context"   # briefing.md + PDFs/DOCX/MD/TXT for the call
 save_transcript = false   # only enable with the other participants' consent
 transcript_dir = "transcripts"
+protocol_dir = "protokolle"    # after every session: summary + full transcript + cards (Word and Markdown)
+protocol_summary = true        # summary written by answer_model
+protocol_docx = true
 
 [audio]
 capture_mic = true        # transcribe yourself too (better context, doubles Deepgram minutes)
@@ -50,3 +53,4 @@ width = 480
 height = 600
 hotkey_answer = "ctrl+alt+a"
 hotkey_toggle = "ctrl+alt+h"
+hotkey_start_stop = "ctrl+alt+s"

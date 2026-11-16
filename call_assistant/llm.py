@@ -80,6 +80,28 @@ Content rules:
 - The transcript is machine-generated and may contain misrecognized words; interpret charitably."""
 
 
+SUMMARY_SYSTEM = """\
+You write the minutes of a conversation that just ended, from its machine-generated transcript. "{me}" is the user \
+you work for{name_hint}; "{them}" is everyone else. The briefing and documents below (for example an outline or \
+agenda) tell you what the conversation was about.
+
+Write in {language}, as Markdown, with exactly these sections (### headings):
+### Zusammenfassung
+3 to 6 sentences: purpose of the conversation, main results, overall tone.
+### Besprochene Punkte
+Bullets in the order they came up. If an outline or agenda exists, follow its structure and say which of its points \
+were discussed and which were not.
+### Entscheidungen und Vereinbarungen
+Bullets, or "Keine".
+### Offene Punkte und nächste Schritte
+Bullets with who does what by when, as far as mentioned, or "Keine".
+### Fragen an {me} und Antworten
+Bullets: each question the others asked, with the gist of the answer given.
+
+Rules: only what is in the transcript, nothing invented. Speech recognition errors are likely; where a passage \
+cannot be understood, write [unklar]. No preamble, no closing remarks."""
+
+
 @dataclass
 class AnswerStats:
     model: str
@@ -236,3 +258,15 @@ class Assistant:
         )
         async for item in self._stream(llm.answer_model, llm.deepen_effort, llm.answer_max_tokens, self._deepen_system, user):
             yield item
+
+    async def summarize(self, transcript: str) -> str:
+        """Minutes for the protocol, written by the stronger model after the session."""
+        llm = self.cfg.llm
+        system = [{"type": "text", "text": SUMMARY_SYSTEM.format(**self._fmt)}, *self._answer_system[1:]]
+        parts: list[str] = []
+        async for item in self._stream(llm.answer_model, "medium", 8000, system, f"<transcript>\n{transcript}\n</transcript>"):
+            if isinstance(item, str):
+                parts.append(item)
+            elif item.refused:
+                raise RuntimeError("Zusammenfassung vom Modell abgelehnt")
+        return "".join(parts).strip()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from html import escape
 
 from typing import Callable
@@ -9,6 +10,7 @@ from typing import Callable
 from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QFont
 from PyQt6.QtWidgets import (
+    QApplication,
     QDialog,
     QFileDialog,
     QFrame,
@@ -69,7 +71,15 @@ class QtSink(QObject):
     card_start_sig = pyqtSignal(int, str, str)
     card_delta_sig = pyqtSignal(int, str)
     card_done_sig = pyqtSignal(int, object, str)
+    session_sig = pyqtSignal(str, str)
+    protocol_sig = pyqtSignal(str)
     toggle_sig = pyqtSignal()
+
+    def session(self, state: str, detail: str = "") -> None:
+        self.session_sig.emit(state, detail)
+
+    def protocol_saved(self, path: str) -> None:
+        self.protocol_sig.emit(path)
 
     def status(self, state: str, detail: str = "") -> None:
         self.status_sig.emit(state, detail)
@@ -233,11 +243,16 @@ class Overlay(QWidget):
         sink: QtSink,
         store: ContextStore | None = None,
         on_context_changed: Callable[[], str] | None = None,
+        on_start_stop: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg
         self.store = store
         self.on_context_changed = on_context_changed
+        self.on_start_stop = on_start_stop
+        self._session_state = "idle"
+        self._quit_when_idle = False
+        self._protocol_path: str | None = None
         self._lines: list[str] = []
         self._partials: dict[str, str] = {}
         self._speaker_colors: dict[str, str] = {}
@@ -272,6 +287,11 @@ class Overlay(QWidget):
         header.addWidget(self.dot)
         header.addWidget(self.title)
         header.addWidget(self.state_label, 1)
+        self.start_button = QPushButton("▶ Start", objectName="start")
+        self.start_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.start_button.clicked.connect(lambda: self.on_start_stop and self.on_start_stop())
+        self.start_button.setVisible(on_start_stop is not None)
+        header.addWidget(self.start_button)
         self.ctx_button = QPushButton("Kontext", objectName="ctx")
         self.ctx_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.ctx_button.clicked.connect(self.open_context_dialog)
@@ -294,11 +314,7 @@ class Overlay(QWidget):
         self.cards_layout = QVBoxLayout(feed)
         self.cards_layout.setContentsMargins(0, 0, 4, 0)
         self.cards_layout.setSpacing(6)
-        self.empty_label = QLabel(
-            f"Noch keine Karten. Sie erscheinen, sobald im Gespräch etwas Relevantes fällt.\n"
-            f"{cfg.hotkey_answer.upper()} = ausführliche Antwort jetzt.",
-            objectName="empty",
-        )
+        self.empty_label = QLabel("", objectName="empty")
         self.empty_label.setWordWrap(True)
         self.cards_layout.addWidget(self.empty_label)
         self.cards_layout.addStretch(1)
@@ -332,6 +348,11 @@ class Overlay(QWidget):
         footer = QHBoxLayout()
         self.meta_label = QLabel(f"{cfg.hotkey_toggle.upper()} ein-/ausblenden", objectName="meta")
         footer.addWidget(self.meta_label, 1)
+        self.protocol_button = QPushButton("Protokoll öffnen", objectName="ctx")
+        self.protocol_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.protocol_button.clicked.connect(self.open_protocol)
+        self.protocol_button.hide()
+        footer.addWidget(self.protocol_button)
         layout.addLayout(footer)
 
         sink.status_sig.connect(self.on_status)
@@ -341,8 +362,10 @@ class Overlay(QWidget):
         sink.card_start_sig.connect(self.on_card_start)
         sink.card_delta_sig.connect(self.on_card_delta)
         sink.card_done_sig.connect(self.on_card_done)
+        sink.session_sig.connect(self.on_session)
+        sink.protocol_sig.connect(self.on_protocol)
         sink.toggle_sig.connect(self.toggle)
-        self.on_status("listening", "Starte …")
+        self.on_session("idle", "Bereit")
         self.setAcceptDrops(store is not None)
 
     # ---- feed scrolling ------------------------------------------------------------------------
@@ -435,6 +458,74 @@ class Overlay(QWidget):
                 self._meters[name] = bar
             # Speech RMS is typically 0.01-0.2; a square-root curve makes quiet input visible.
             self._meters[name].setValue(min(100, int((level ** 0.5) * 220)))
+
+    # ---- session ------------------------------------------------------------------------------
+
+    def _clear(self) -> None:
+        for card in self._cards.values():
+            card.deleteLater()
+        self._cards.clear()
+        self._lines.clear()
+        self._partials.clear()
+        self.transcript_view.clear()
+        self._unseen = 0
+        self._follow = True
+        self.jump.hide()
+        self.empty_label.show()
+
+    def on_session(self, state: str, detail: str) -> None:
+        self._session_state = state
+        hk_start = self.cfg.hotkey_start_stop.upper()
+        if state == "running":
+            self._clear()  # a new session starts with an empty feed; the last one is in its protocol
+            self.empty_label.setText(
+                "Aufnahme läuft. Karten erscheinen, sobald im Gespräch etwas Relevantes fällt.\n"
+                f"{self.cfg.hotkey_answer.upper()} = ausführliche Antwort jetzt."
+            )
+            self.start_button.setText("■ Stopp")
+            self.start_button.setStyleSheet("background: #da3633; color: white;")
+            self.start_button.setEnabled(True)
+            self.on_status("listening", detail)
+        elif state == "saving":
+            self.start_button.setText("Speichere …")
+            self.start_button.setEnabled(False)
+            self.on_status("answering", detail)
+        else:
+            self.start_button.setText("▶ Start")
+            self.start_button.setStyleSheet("background: #238636; color: white;")
+            self.start_button.setEnabled(True)
+            self.dot.setStyleSheet("color: #8b949e;")
+            self.state_label.setText(detail)
+            for bar in self._meters.values():
+                bar.setValue(0)
+            if not self._cards:
+                self.empty_label.setText(
+                    f"Bereit, es wird nichts aufgenommen. Klicke auf ▶ Start (oder {hk_start}), "
+                    "sobald das Gespräch beginnt. Stopp beendet die Aufnahme und speichert das Protokoll."
+                )
+            if self._quit_when_idle:
+                QApplication.quit()
+
+    def on_protocol(self, path: str) -> None:
+        self._protocol_path = path
+        self.protocol_button.show()
+        self.meta_label.setText(f"Protokoll: {path}")
+        self.meta_label.setToolTip(path)
+
+    def open_protocol(self) -> None:
+        if self._protocol_path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self._protocol_path).resolve())))
+
+    def closeEvent(self, event) -> None:
+        # Closing during a session first stops it, so the protocol is written before the app exits.
+        if self._session_state in ("running", "saving"):
+            event.ignore()
+            self._quit_when_idle = True
+            if self._session_state == "running" and self.on_start_stop:
+                self.on_start_stop()
+            self.state_label.setText("Beende … Protokoll wird gespeichert")
+            return
+        event.accept()
 
     # ---- context -----------------------------------------------------------------------------
 

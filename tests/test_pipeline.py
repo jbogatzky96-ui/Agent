@@ -105,6 +105,9 @@ class FakeAssistant:
         yield "- Begründung mit Zahl"
         yield AnswerStats("fake-opus", 2.0, 3.0, 10, 0, 5)
 
+    async def summarize(self, transcript):
+        return "### Zusammenfassung\nEs ging um den **Umsatz**.\n### Offene Punkte und nächste Schritte\n- Zahl nachliefern"
+
     async def stream_answer(self, transcript):
         self.answers += 1
         yield "**Ausführlich**"
@@ -125,8 +128,10 @@ class RecordingSink:
 def run_sim(tmp_path, script, assistant=None, cfg=None):
     path = tmp_path / "sim.txt"
     path.write_text(script, encoding="utf-8")
+    cfg = cfg or AppConfig()
+    cfg.protocol_dir = str(tmp_path / "protokolle")
     assistant, sink = assistant or FakeAssistant(), RecordingSink()
-    asyncio.run(Engine(cfg or AppConfig(), sink, assistant, simulate=path).run())
+    asyncio.run(Engine(cfg, sink, assistant, simulate=path, context_files=lambda: ["briefing.md"]).run())
     return assistant, sink
 
 
@@ -376,3 +381,77 @@ def test_assistant_context_can_be_swapped_and_prompts_ask_for_spoken_prose():
         assert "Gliederung: 1. Einleitung" in system[-1]["text"]
         assert "read it out loud" in system[0]["text"] and "no lists" in system[0]["text"]
         assert "outline (Gliederung)" in system[0]["text"]
+
+
+def test_session_writes_protocol_with_summary_transcript_and_cards(tmp_path):
+    import docx
+
+    fake, sink = run_sim(
+        tmp_path,
+        "them: Wir stehen vor der ISO 27001 Zertifizierung im Frühjahr\npause 0.2\n"
+        "them: Wie hoch war der Umsatz?\npause 0.2\n",
+    )
+    states = [args[0] for name, args in sink.events if name == "session"]
+    assert states[0] == "idle" and "running" in states and states[-1] == "idle"
+    saved = [args[0] for name, args in sink.events if name == "protocol_saved"]
+    assert len(saved) == 1 and saved[0].endswith(".docx")
+
+    md = Path(saved[0]).with_suffix(".md").read_text(encoding="utf-8")
+    assert md.startswith("# Gesprächsprotokoll")
+    assert "Es ging um den **Umsatz**." in md and "**Kontext:** briefing.md" in md
+    assert "Gegenüber:** Wie hoch war der Umsatz?" in md
+    assert "· FRAGE · Wie hoch war der Umsatz?" in md and "Ausführlich zum Ablesen" in md
+    assert "· INFO · ISO 27001" in md
+
+    text = "\n".join(p.text for p in docx.Document(saved[0]).paragraphs)
+    assert "Gesprächsprotokoll" in text and "Zahl nachliefern" in text and "**" not in text
+
+
+def test_protocol_is_saved_even_if_summary_fails_and_skipped_when_empty(tmp_path):
+    class NoSummary(FakeAssistant):
+        async def summarize(self, transcript):
+            raise RuntimeError("API down")
+
+    _, sink = run_sim(tmp_path, "them: Wie hoch war der Umsatz?\npause 0.2\n", assistant=NoSummary())
+    saved = [args[0] for name, args in sink.events if name == "protocol_saved"]
+    md = Path(saved[0]).with_suffix(".md").read_text(encoding="utf-8")
+    assert "Keine Zusammenfassung: Fehler bei der Erstellung (API down)" in md
+    assert "Wie hoch war der Umsatz?" in md
+
+    _, sink = run_sim(tmp_path, "pause 0.1\n")
+    assert not [1 for name, _ in sink.events if name == "protocol_saved"]
+    assert "kein Protokoll" in [args for name, args in sink.events if name == "session"][-1][1]
+
+
+def test_engine_start_stop_toggle_and_hotkey_only_while_running(tmp_path):
+    cfg = AppConfig()
+    cfg.protocol_dir = str(tmp_path / "p")
+    fake, sink = FakeAssistant(), RecordingSink()
+    engine = Engine(cfg, sink, fake)
+
+    async def no_audio():
+        await asyncio.Event().wait()
+
+    engine._run_live = no_audio  # stands in for microphone + Deepgram
+
+    async def scenario():
+        main = asyncio.create_task(engine.run())
+        await asyncio.sleep(0.05)
+        engine._on_hotkey()  # idle: ignored
+        engine._toggle()  # start
+        await asyncio.sleep(0.05)
+        assert engine.running
+        engine._on_utterance("Gegenüber", "Wie hoch war der Umsatz?")
+        await asyncio.sleep(0.3)
+        engine._toggle()  # stop -> protocol
+        while engine._session_task is not None:
+            await asyncio.sleep(0.05)
+        engine._toggle()  # a second session starts fresh
+        await asyncio.sleep(0.05)
+        assert engine.running and engine.transcript.turns == []
+        main.cancel()
+        await asyncio.gather(main, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert fake.answers == 0
+    assert len([1 for name, _ in sink.events if name == "protocol_saved"]) == 1  # 2nd session was empty

@@ -59,6 +59,7 @@ class UIConfig:
     height: int = 600
     hotkey_answer: str = "ctrl+alt+a"
     hotkey_toggle: str = "ctrl+alt+h"
+    hotkey_start_stop: str = "ctrl+alt+s"
 
 
 @dataclass
@@ -70,6 +71,9 @@ class AppConfig:
     context_dir: str = "context"
     save_transcript: bool = False
     transcript_dir: str = "transcripts"
+    protocol_dir: str = "protokolle"  # minutes are written here after every session
+    protocol_summary: bool = True
+    protocol_docx: bool = True
     audio: AudioConfig = field(default_factory=AudioConfig)
     deepgram: DeepgramConfig = field(default_factory=DeepgramConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)

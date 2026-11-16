@@ -47,6 +47,12 @@ class ConsoleSink:
             self._cards[card_id] = [f"{self._titles.get(card_id, '')} (Fortsetzung)\n"]
         self._cards[card_id].append(text)
 
+    def session(self, state: str, detail: str = "") -> None:
+        print(f"\n=== {detail or state} ===", flush=True)
+
+    def protocol_saved(self, path: str) -> None:
+        print(f"Protokoll: {Path(path).resolve()}", flush=True)
+
     def card_done(self, card_id: int, stats: AnswerStats | None, error: str = "") -> None:
         text = "".join(self._cards.pop(card_id, []))
         meta = f"[{error}]" if error else ""
@@ -119,11 +125,15 @@ def main() -> None:
 
     assistant = Assistant(cfg, context_text)
 
+    def context_files() -> list[str]:
+        return [p.relative_to(store.dir).as_posix() for p in store.files()]
+
     if args.no_ui:
-        engine = Engine(cfg, ConsoleSink(), assistant, simulate=args.simulate)
+        engine = Engine(cfg, ConsoleSink(), assistant, simulate=args.simulate, context_files=context_files)
         register_hotkeys({cfg.ui.hotkey_answer: engine.request_answer})
+        print("Aufnahme läuft. Strg+C beendet die Sitzung und speichert das Protokoll.", flush=True)
         try:
-            asyncio.run(engine.run())
+            asyncio.run(engine.run(autostart=True))
         except KeyboardInterrupt:
             pass
         return
@@ -147,9 +157,9 @@ def main() -> None:
         log.info("Context reloaded: %d characters (~%d tokens)", len(text), len(text) // 4)
         return ContextStore.summary(text, len(store.files()))
 
-    overlay = Overlay(cfg.ui, sink, store, reload_context)
+    engine = Engine(cfg, sink, assistant, simulate=args.simulate, context_files=context_files)
+    overlay = Overlay(cfg.ui, sink, store, reload_context, on_start_stop=engine.request_toggle)
     overlay.set_context_summary(ContextStore.summary(context_text, len(store.files())))
-    engine = Engine(cfg, sink, assistant, simulate=args.simulate)
 
     def run_engine() -> None:
         try:
@@ -158,7 +168,11 @@ def main() -> None:
             log.exception("Engine stopped")
             sink.status("error", str(exc))
 
-    register_hotkeys({cfg.ui.hotkey_answer: engine.request_answer, cfg.ui.hotkey_toggle: sink.toggle_sig.emit})
+    register_hotkeys({
+        cfg.ui.hotkey_answer: engine.request_answer,
+        cfg.ui.hotkey_toggle: sink.toggle_sig.emit,
+        cfg.ui.hotkey_start_stop: engine.request_toggle,
+    })
     thread = threading.Thread(target=run_engine, name="engine", daemon=True)
     thread.start()
     overlay.show()

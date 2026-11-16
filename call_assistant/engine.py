@@ -9,10 +9,11 @@ import re
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .config import AppConfig
 from .llm import AnswerStats, Assistant, CardHeader
+from .protocol import CardRecord, SessionRecord, save_protocol
 from .transcript import Transcript, Turn
 
 log = logging.getLogger(__name__)
@@ -28,28 +29,49 @@ class UiSink(Protocol):
     def card_start(self, card_id: int, kind: str, title: str) -> None: ...
     def card_delta(self, card_id: int, text: str) -> None: ...
     def card_done(self, card_id: int, stats: AnswerStats | None, error: str = "") -> None: ...
+    def session(self, state: str, detail: str = "") -> None: ...  # "idle" | "running" | "saving"
+    def protocol_saved(self, path: str) -> None: ...
 
 
 class Engine:
-    def __init__(self, cfg: AppConfig, ui: UiSink, assistant: Assistant, simulate: Path | None = None) -> None:
+    def __init__(
+        self,
+        cfg: AppConfig,
+        ui: UiSink,
+        assistant: Assistant,
+        simulate: Path | None = None,
+        context_files: Callable[[], list[str]] = lambda: [],
+    ) -> None:
         self.cfg = cfg
         self.ui = ui
         self.assistant = assistant
         self.simulate = simulate
-        save = None
-        if cfg.save_transcript:
-            save = Path(cfg.transcript_dir) / f"call_{datetime.now():%Y-%m-%d_%H-%M-%S}.txt"
-        self.transcript = Transcript(save)
+        self.context_files = context_files
         self.loop: asyncio.AbstractEventLoop | None = None
-        self._streams: list = []
         self._main_task: asyncio.Task | None = None
         self._card_ids = itertools.count(1)
+        self._session_task: asyncio.Task | None = None
+        self._stopping = False
+        self._reset_session_state()
+
+    def _reset_session_state(self) -> None:
+        save = None
+        if self.cfg.save_transcript:
+            save = Path(self.cfg.transcript_dir) / f"call_{datetime.now():%Y-%m-%d_%H-%M-%S}.txt"
+        self.transcript = Transcript(save)
+        self.session_started = datetime.now()
+        self._streams: list = []
         self._answer_task: asyncio.Task | None = None
         self._feed_event = asyncio.Event()
         self._feed_busy = False
         self._fed_turn_id = 0  # turns up to this id are covered by a card (or were skipped by the model)
         self._recent_cards: deque[str] = deque(maxlen=6)
         self._deepen_tasks: set[asyncio.Task] = set()
+        self._cards: dict[int, CardRecord] = {}
+
+    @property
+    def running(self) -> bool:
+        return self._session_task is not None and not self._stopping
 
     # ---- thread-safe entry points (hotkeys, UI) -------------------------------------------------
 
@@ -57,29 +79,140 @@ class Engine:
         if self.loop:
             self.loop.call_soon_threadsafe(self._on_hotkey)
 
+    def request_toggle(self) -> None:
+        """Start if idle, stop (and write the protocol) if running. Safe to call from any thread."""
+        if self.loop:
+            self.loop.call_soon_threadsafe(self._toggle)
+
     def stop(self) -> None:
         if self.loop and self._main_task:
             self.loop.call_soon_threadsafe(self._main_task.cancel)
 
     # ---- pipeline ------------------------------------------------------------------------------
 
-    async def run(self) -> None:
+    async def run(self, autostart: bool = False) -> None:
         self.loop = asyncio.get_running_loop()
         self._main_task = asyncio.current_task()
-        self.ui.status("listening", "Höre zu")
+        self.ui.session("idle", "Bereit")
+        try:
+            if self.simulate:
+                self._start_session()
+                while self._session_task is not None:
+                    await asyncio.sleep(0.05)
+            else:
+                if autostart:
+                    self._start_session()
+                await asyncio.Event().wait()  # idle until the app quits; sessions are started via request_toggle
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._session_task is not None:  # app closed or Ctrl+C during a session: still write the protocol
+                await self._stop_session()
+
+    # ---- sessions ------------------------------------------------------------------------------
+
+    def _toggle(self) -> None:
+        if self._stopping:
+            return
+        if self._session_task is None:
+            self._start_session()
+        else:
+            asyncio.get_running_loop().create_task(self._stop_session())
+
+    def _start_session(self) -> None:
+        self._reset_session_state()
+        log.info("Session started")
+        self.ui.session("running", "Höre zu")
+        self._session_task = asyncio.get_running_loop().create_task(self._session_body())
+        self._session_task.add_done_callback(self._on_session_ended)
+
+    def _on_session_ended(self, task: asyncio.Task) -> None:
+        # The body ends on its own when the simulation is over or audio/STT failed; finish the session then.
+        if self._stopping or task.cancelled():
+            return
+        if exc := task.exception():
+            log.error("Session aborted: %s", exc)
+            self.ui.status("error", f"Abgebrochen: {exc}")
+        asyncio.get_running_loop().create_task(self._stop_session())
+
+    async def _session_body(self) -> None:
         feed = asyncio.create_task(self._feed_loop()) if self.cfg.llm.feed_enabled else None
         try:
             if self.simulate:
                 await self._run_simulation(self.simulate)
             else:
                 await self._run_live()
-        except asyncio.CancelledError:
-            pass
         finally:
-            tasks = [t for t in (feed, self._answer_task, *self._deepen_tasks) if t]
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            if feed:
+                feed.cancel()
+                await asyncio.gather(feed, return_exceptions=True)
+
+    async def _stop_session(self) -> None:
+        if self._session_task is None or self._stopping:
+            return
+        self._stopping = True
+        try:
+            self.ui.session("saving", "Beende Aufnahme …")
+            for stream in self._streams:
+                stream.flush()  # keep the sentence that was still being spoken
+            self._session_task.cancel()
+            await asyncio.gather(self._session_task, return_exceptions=True)
+
+            # Give answers that are still being written a moment so they end up in the protocol.
+            pending = [t for t in (self._answer_task, *self._deepen_tasks) if t and not t.done()]
+            if pending:
+                _, still_running = await asyncio.wait(pending, timeout=15)
+                for task in still_running:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            ended = datetime.now()
+            log.info("Session stopped")
+
+            if not self.transcript.turns:
+                self.ui.session("idle", "Gestoppt · nichts aufgenommen, kein Protokoll")
+                return
+            self.ui.session("saving", "Protokoll wird erstellt …")
+            path = await self._write_protocol(ended)
+            self.ui.protocol_saved(str(path))
+            self.ui.session("idle", "Protokoll gespeichert")
+        except Exception as exc:
+            log.exception("Could not finish the session")
+            self.ui.session("idle", f"Protokoll fehlgeschlagen: {exc}")
+        finally:
+            self._session_task = None
+            self._stopping = False
+
+    async def _write_protocol(self, ended: datetime) -> Path:
+        summary, note = None, ""
+        if self.cfg.protocol_summary:
+            try:
+                summary = await self.assistant.summarize(self.transcript.render())
+            except Exception as exc:  # the transcript must be saved even if the summary fails
+                log.error("Summary failed: %s", exc)
+                note = f"Fehler bei der Erstellung ({exc})"
+        else:
+            note = "in der Konfiguration deaktiviert"
+        record = SessionRecord(
+            started=self.session_started,
+            ended=ended,
+            turns=list(self.transcript.turns),
+            cards=list(self._cards.values()),
+            context_files=self.context_files(),
+        )
+        return save_protocol(record, summary, self.cfg.protocol_dir, docx=self.cfg.protocol_docx, summary_note=note)
+
+    # ---- card bookkeeping: every card goes to the UI and into the protocol ----------------------
+
+    def _card_start(self, kind: str, title: str) -> int:
+        card_id = next(self._card_ids)
+        self._cards[card_id] = CardRecord(card_id, kind, title)
+        self.ui.card_start(card_id, kind, title)
+        return card_id
+
+    def _card_delta(self, card_id: int, text: str) -> None:
+        if card := self._cards.get(card_id):
+            card.text += text
+        self.ui.card_delta(card_id, text)
 
     async def _run_live(self) -> None:
         from .audio import AudioCapture, _pyaudio, find_loopback, find_mic
@@ -174,6 +307,9 @@ class Engine:
         self._feed_event.set()
 
     def _on_hotkey(self) -> None:
+        if not self.running:
+            self.ui.status("listening", "Erst Start drücken, dann antwortet der Hotkey")
+            return
         for stream in self._streams:
             stream.flush()  # include the sentence that is still being spoken
         if self._answer_task and not self._answer_task.done():
@@ -220,8 +356,7 @@ class Engine:
             async for item in self.assistant.stream_card(earlier, new, list(self._recent_cards)):
                 if isinstance(item, CardHeader):
                     header = item
-                    card_id = next(self._card_ids)
-                    self.ui.card_start(card_id, item.kind, item.title)
+                    card_id = self._card_start(item.kind, item.title)
                     self._recent_cards.append(f"{KIND_LABELS[item.kind]}: {item.title}")
                     log.info("Card %s: %s", KIND_LABELS[item.kind], item.title)
                 elif isinstance(item, AnswerStats):
@@ -231,7 +366,7 @@ class Engine:
                         self._start_deepen(card_id, header.title, "".join(body))
                 else:
                     body.append(item)
-                    self.ui.card_delta(card_id, item)
+                    self._card_delta(card_id, item)
             if card_id is None:
                 log.info("Feed: nothing to add (SKIP)")
         except asyncio.CancelledError:
@@ -262,8 +397,8 @@ class Engine:
                     continue
                 if not started:
                     started = True
-                    self.ui.card_delta(card_id, "\n\n**▸ Ausführlich zum Ablesen:**\n\n")
-                self.ui.card_delta(card_id, item)
+                    self._card_delta(card_id, "\n\n**▸ Ausführlich zum Ablesen:**\n\n")
+                self._card_delta(card_id, item)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -273,9 +408,8 @@ class Engine:
     # ---- hotkey: thorough answer -----------------------------------------------------------------
 
     async def _hotkey_answer(self) -> None:
-        card_id = next(self._card_ids)
         log.info("Hotkey answer requested")
-        self.ui.card_start(card_id, "answer", "Ausführliche Antwort (Hotkey)")
+        card_id = self._card_start("answer", "Ausführliche Antwort (Hotkey)")
         self.ui.status("answering", "Antworte …")
         transcript = self.transcript.render(max_chars=self.cfg.llm.answer_transcript_chars)
         try:
@@ -284,9 +418,9 @@ class Engine:
                     self.ui.card_done(card_id, item)
                     self._log_stats("Answer", item)
                 else:
-                    self.ui.card_delta(card_id, item)
+                    self._card_delta(card_id, item)
         except asyncio.CancelledError:
-            self.ui.card_done(card_id, None, error="abgebrochen (neuer Hotkey)")
+            self.ui.card_done(card_id, None, error="abgebrochen")
             raise
         except Exception as exc:
             log.error("Answer failed: %s", exc)

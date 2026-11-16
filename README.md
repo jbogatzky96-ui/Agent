@@ -50,6 +50,8 @@ The context is sent with every answer and cached for an hour, so repeated answer
 
 ## Run
 
+The window opens in standby: nothing is recorded until you click **▶ Start** (or press `Ctrl+Alt+S`). **■ Stopp** ends the recording and automatically writes the minutes to `protokolle/` as Word and Markdown: an AI summary (topics along your outline, decisions, open points and next steps, questions you were asked), the full transcript with timestamps and all cards. "Protokoll öffnen" opens it. Closing the window during a recording stops it and saves the minutes first. In `--no-ui` mode recording starts immediately and `Ctrl+C` stops it.
+
 First test without audio or Deepgram (only uses the Anthropic API):
 
 ```powershell
@@ -71,6 +73,7 @@ The card feed scrolls like a chat: new cards appear at the bottom and the view f
 
 | Hotkey | Action |
 |---|---|
+| `Ctrl+Alt+S` | Start / stop recording (same as the ▶ Start / ■ Stopp button) |
 | `Ctrl+Alt+A` | Thorough answer now with the stronger model (the most recent open question, including a sentence still being spoken) |
 | `Ctrl+Alt+H` | Show/hide the overlay |
 
