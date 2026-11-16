@@ -120,7 +120,8 @@ class Card(QFrame):
         elif stats:
             first = f"{stats.first_token_s:.1f}s" if stats.first_token_s is not None else "–"
             refused = " · vom Modell abgelehnt" if stats.refused else ""
-            self.meta.setText(f"{stats.model} · {first}{refused}")
+            entry = f"{stats.model} {first}{refused}"
+            self.meta.setText(f"{self.meta.text()} · {entry}" if self.meta.text() else entry)
             self.meta.show()
 
 

@@ -24,6 +24,7 @@ class ConsoleSink:
 
     def __init__(self) -> None:
         self._cards: dict[int, list[str]] = {}
+        self._titles: dict[int, str] = {}
 
     def status(self, state: str, detail: str = "") -> None:
         log.debug("status %s %s", state, detail)
@@ -38,10 +39,13 @@ class ConsoleSink:
         pass
 
     def card_start(self, card_id: int, kind: str, title: str) -> None:
-        self._cards[card_id] = [f"[{self.LABELS.get(kind, kind)}] {title}\n"]
+        self._titles[card_id] = f"[{self.LABELS.get(kind, kind)}] {title}"
+        self._cards[card_id] = [self._titles[card_id] + "\n"]
 
     def card_delta(self, card_id: int, text: str) -> None:
-        self._cards.setdefault(card_id, []).append(text)
+        if card_id not in self._cards:  # continuation after the card was printed (second stage)
+            self._cards[card_id] = [f"{self._titles.get(card_id, '')} (Fortsetzung)\n"]
+        self._cards[card_id].append(text)
 
     def card_done(self, card_id: int, stats: AnswerStats | None, error: str = "") -> None:
         text = "".join(self._cards.pop(card_id, []))

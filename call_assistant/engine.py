@@ -49,6 +49,7 @@ class Engine:
         self._feed_busy = False
         self._fed_turn_id = 0  # turns up to this id are covered by a card (or were skipped by the model)
         self._recent_cards: deque[str] = deque(maxlen=6)
+        self._deepen_tasks: set[asyncio.Task] = set()
 
     # ---- thread-safe entry points (hotkeys, UI) -------------------------------------------------
 
@@ -75,10 +76,10 @@ class Engine:
         except asyncio.CancelledError:
             pass
         finally:
-            for task in (feed, self._answer_task):
-                if task:
-                    task.cancel()
-            await asyncio.gather(*(t for t in (feed, self._answer_task) if t), return_exceptions=True)
+            tasks = [t for t in (feed, self._answer_task, *self._deepen_tasks) if t]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _run_live(self) -> None:
         from .audio import AudioCapture, _pyaudio, find_loopback, find_mic
@@ -156,7 +157,12 @@ class Engine:
             await asyncio.sleep(min(0.25 * len(text.split()), 4.0))  # rough speaking time
             self._on_utterance(speaker, text.strip())
         await asyncio.sleep(0.1)
-        while self._feed_event.is_set() or self._feed_busy or (self._answer_task and not self._answer_task.done()):
+        while (
+            self._feed_event.is_set()
+            or self._feed_busy
+            or self._deepen_tasks
+            or (self._answer_task and not self._answer_task.done())
+        ):
             await asyncio.sleep(0.05)
 
     # ---- events --------------------------------------------------------------------------------
@@ -208,9 +214,12 @@ class Engine:
         earlier = "\n".join(t.render() for t in earlier_turns)[-llm.feed_transcript_chars:]
         new = "\n".join(t.render() for t in segment)
         card_id = None
+        header: CardHeader | None = None
+        body: list[str] = []
         try:
             async for item in self.assistant.stream_card(earlier, new, list(self._recent_cards)):
                 if isinstance(item, CardHeader):
+                    header = item
                     card_id = next(self._card_ids)
                     self.ui.card_start(card_id, item.kind, item.title)
                     self._recent_cards.append(f"{KIND_LABELS[item.kind]}: {item.title}")
@@ -218,7 +227,10 @@ class Engine:
                 elif isinstance(item, AnswerStats):
                     self.ui.card_done(card_id, item)
                     self._log_stats("Card", item)
+                    if header and header.kind == "question" and self.cfg.llm.deepen_questions and not item.refused:
+                        self._start_deepen(card_id, header.title, "".join(body))
                 else:
+                    body.append(item)
                     self.ui.card_delta(card_id, item)
             if card_id is None:
                 log.info("Feed: nothing to add (SKIP)")
@@ -230,6 +242,33 @@ class Engine:
                 self.ui.card_done(card_id, None, error=f"Fehler: {exc}")
             else:
                 self.ui.status("error", f"Live-Karte fehlgeschlagen: {type(exc).__name__}")
+
+    # ---- second stage: depth for question cards ------------------------------------------------
+
+    def _start_deepen(self, card_id: int, question: str, short_answer: str) -> None:
+        task = asyncio.get_running_loop().create_task(self._deepen(card_id, question, short_answer))
+        self._deepen_tasks.add(task)
+        task.add_done_callback(self._deepen_tasks.discard)
+
+    async def _deepen(self, card_id: int, question: str, short_answer: str) -> None:
+        # Runs in parallel to the feed, so new cards keep coming while the stronger model writes.
+        transcript = self.transcript.render(max_chars=self.cfg.llm.answer_transcript_chars)
+        started = False
+        try:
+            async for item in self.assistant.stream_deepen(transcript, question, short_answer):
+                if isinstance(item, AnswerStats):
+                    self.ui.card_done(card_id, item)
+                    self._log_stats("Deepen", item)
+                    continue
+                if not started:
+                    started = True
+                    self.ui.card_delta(card_id, "\n\n**▸ Ausführlich:**\n\n")
+                self.ui.card_delta(card_id, item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error("Deepen failed: %s", exc)
+            self.ui.card_done(card_id, None, error=f"Vertiefung fehlgeschlagen: {exc}")
 
     # ---- hotkey: thorough answer -----------------------------------------------------------------
 

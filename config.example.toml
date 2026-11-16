@@ -31,10 +31,15 @@ feed_max_tokens = 1500
 feed_min_words = 6                # collect short segments until this many words (or a "?")
 feed_on_my_speech = false         # also create cards after you speak
 feed_transcript_chars = 20000
-# Hotkey (Ctrl+Alt+A): thorough answer with the stronger model
+feed_max_words = 150              # length limit of a card
+# Second stage: for FRAGE cards the stronger model adds a thorough answer to the same card
+deepen_questions = true
+deepen_effort = "medium"          # low = faster, high = more thorough
+# Stronger model, used for the second stage and for the hotkey (Ctrl+Alt+A)
 answer_model = "claude-opus-5-5"
-answer_effort = "low"             # low = fastest; medium/high = more thorough but slower
+answer_effort = "low"             # hotkey: low = fastest; medium/high = more thorough but slower
 answer_max_tokens = 4000
+answer_max_words = 220
 answer_transcript_chars = 60000
 use_refusal_fallback = true
 

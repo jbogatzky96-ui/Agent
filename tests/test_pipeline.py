@@ -86,6 +86,7 @@ class FakeAssistant:
         self.delay = delay
         self.segments = []
         self.answers = 0
+        self.deepened = []
 
     async def stream_card(self, earlier, segment, recent_cards):
         self.segments.append(segment)
@@ -98,6 +99,11 @@ class FakeAssistant:
             return
         yield "**Vorschlag**"
         yield AnswerStats("fake", 0.1, 0.2, 10, 0, 3)
+
+    async def stream_deepen(self, transcript, question, short_answer):
+        self.deepened.append((question, short_answer))
+        yield "- Begründung mit Zahl"
+        yield AnswerStats("fake-opus", 2.0, 3.0, 10, 0, 5)
 
     async def stream_answer(self, transcript):
         self.answers += 1
@@ -139,7 +145,26 @@ def test_feed_creates_question_and_info_cards_and_skips_small_talk(tmp_path):
     assert len(fake.segments) == 3  # small talk was checked too, the model just answered SKIP
     assert fake.answers == 1
     done = [args for name, args in sink.events if name == "card_done"]
-    assert len(done) == 3 and all(args[1] is not None for args in done)
+    assert len(done) == 4 and all(args[1] is not None for args in done)  # question card finishes twice
+
+
+def test_question_cards_get_deepened_in_the_same_card(tmp_path):
+    fake, sink = run_sim(
+        tmp_path,
+        "them: Wir stehen vor der ISO 27001 Zertifizierung im Frühjahr\npause 0.2\n"
+        "them: Wie hoch war der Umsatz?\npause 0.2\n",
+    )
+    assert fake.deepened == [("Wie hoch war der Umsatz?", "**Vorschlag**")]  # only the FRAGE card
+    question_id = next(args[0] for name, args in sink.events if name == "card_start" and args[1] == "question")
+    deltas = [args[1] for name, args in sink.events if name == "card_delta" and args[0] == question_id]
+    assert deltas == ["**Vorschlag**", "\n\n**▸ Ausführlich:**\n\n", "- Begründung mit Zahl"]
+    models = [args[1].model for name, args in sink.events if name == "card_done" and args[0] == question_id]
+    assert models == ["fake", "fake-opus"]
+
+    cfg = AppConfig()
+    cfg.llm.deepen_questions = False
+    fake, _ = run_sim(tmp_path, "them: Wie hoch war der Umsatz?\npause 0.2\n", cfg=cfg)
+    assert fake.deepened == []
 
 
 def test_feed_collects_short_utterances_and_ignores_my_speech(tmp_path):

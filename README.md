@@ -9,6 +9,8 @@ microphone ──────────┘     transcript          └─ hotk
                                                   both use your briefing/docs ─> overlay
 ```
 
+For FRAGE cards a second stage starts automatically: Claude Opus 5.5 appends a thorough answer ("▸ Ausführlich") to the same card a few seconds later, with reasoning, numbers, likely objections and follow-up questions. You get something to say within about a second and substance shortly after. Turn it off with `deepen_questions = false`; card length is set with `feed_max_words`.
+
 There is no separate "is this a question?" step that could miss something. After every segment the other side says, the model sees the conversation plus your briefing and decides itself whether a card helps. Short fragments are collected until enough was said, and segments that arrive while a card is being written are combined into the next card, so the feed never falls behind.
 
 No bot joins the call. The app records what your headset plays (WASAPI loopback) and your microphone, as two separate streams, so it knows who said what without speaker diarization.
@@ -74,7 +76,7 @@ It is a normal Windows window that stays on top: move it by the title bar, resiz
 
 - **Use headphones.** With speakers, your microphone picks up the other participants and everything appears twice in the transcript.
 - **Latency:** expect about 1 to 2 s until the sentence is final plus 1 to 2 s until the first words of the answer. Set `answer_effort = "medium"` for more thorough answers at the cost of speed.
-- **Costs (rough, check current pricing):** two Deepgram streams per call minute (set `capture_mic = false` to halve that); the Haiku feed costs roughly €0.10-0.20 per call hour; one Opus hotkey answer with a few thousand context tokens costs a few cents. If the cards are too shallow, set `feed_model = "claude-sonnet-5-5"` (roughly €1.5-2 per hour).
+- **Costs (rough, check current pricing):** two Deepgram streams per call minute (set `capture_mic = false` to halve that); the Haiku feed costs roughly €0.10-0.20 per call hour, the Opus second stage for questions roughly €1-2 per hour; one Opus hotkey answer with a few thousand context tokens costs a few cents. If the cards are too shallow, set `feed_model = "claude-sonnet-5-5"` (roughly €1.5-2 per hour).
 - If an answer request fails with a 400 error mentioning `fallbacks`, set `use_refusal_fallback = false` in `config.toml`.
 
 ## Legal

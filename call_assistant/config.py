@@ -38,10 +38,15 @@ class LLMConfig:
     feed_min_words: int = 6  # shorter segments are collected until enough was said (or a "?" appears)
     feed_on_my_speech: bool = False  # also create cards after you speak
     feed_transcript_chars: int = 20000
-    # Hotkey: thorough answer with the stronger model.
+    feed_max_words: int = 150
+    # Second stage: for FRAGE cards the stronger model appends a thorough answer to the same card.
+    deepen_questions: bool = True
+    deepen_effort: str = "medium"
+    # Stronger model, used for the second stage and for the hotkey.
     answer_model: str = "claude-opus-5-5"
     answer_effort: str = "low"
     answer_max_tokens: int = 4000
+    answer_max_words: int = 220
     answer_transcript_chars: int = 60000
     use_refusal_fallback: bool = True
 
