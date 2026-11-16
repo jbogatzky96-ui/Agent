@@ -1,12 +1,15 @@
 # Call Assistant
 
-Listens to a video call from outside (Zoom, Teams, Meet or anything else that plays audio on your PC), transcribes it live in German, detects questions from the other participants and shows a suggested answer in a small always-on-top window.
+Listens to a video call from outside (Zoom, Teams, Meet or anything else that plays audio on your PC), transcribes it live in German and keeps a running feed of short cards in a small always-on-top window: a suggested answer when someone asks something (FRAGE), background on topics, terms and numbers that come up (INFO). A hotkey gives you a thorough answer on demand (ANTWORT).
 
 ```
-speakers (loopback) ─┐                         ┌─ question detector (Claude Haiku 5.5)
-                     ├─ Deepgram nova-3 (de) ──┤
-microphone ──────────┘     transcript          └─ answer (Claude Opus 5.5 + briefing/docs) ─> overlay
+speakers (loopback) ─┐                         ┌─ live feed after every segment (Claude Haiku 5.5):
+                     ├─ Deepgram nova-3 (de) ──┤    FRAGE card, INFO card, or nothing
+microphone ──────────┘     transcript          └─ hotkey: thorough answer (Claude Opus 5.5)
+                                                  both use your briefing/docs ─> overlay
 ```
+
+There is no separate "is this a question?" step that could miss something. After every segment the other side says, the model sees the conversation plus your briefing and decides itself whether a card helps. Short fragments are collected until enough was said, and segments that arrive while a card is being written are combined into the next card, so the feed never falls behind.
 
 No bot joins the call. The app records what your headset plays (WASAPI loopback) and your microphone, as two separate streams, so it knows who said what without speaker diarization.
 
@@ -56,11 +59,13 @@ run.bat --list-devices  # if the wrong headset/mic is picked up
 run.bat --log-file debug.log  # also write everything to a file (contains the transcript!)
 ```
 
-The overlay shows a level bar per audio source. If the bar for "Gegenüber" stays flat while someone talks, the app is listening to the wrong output device: check the Windows default playback device or set `loopback_device` in `config.toml`. Under "Transkript" you see everything that was recognized, and a yellow "Frage erkannt" line whenever a question triggered an answer. The terminal window logs the same plus every detection decision.
+The overlay shows a level bar per audio source. If the bar for "Gegenüber" stays flat while someone talks, the app is listening to the wrong output device: check the Windows default playback device or set `loopback_device` in `config.toml`. Under "Transkript" you see everything that was recognized. The terminal window logs every utterance, every card and every SKIP.
+
+The card feed scrolls like a chat: new cards appear at the bottom and the view follows them. When you scroll up to re-read something, the view stays where you are and a "↓ neue Karten" button takes you back to the latest card. The divider between cards and transcript can be dragged.
 
 | Hotkey | Action |
 |---|---|
-| `Ctrl+Alt+A` | Answer now (the most recent open question, including a sentence still being spoken) |
+| `Ctrl+Alt+A` | Thorough answer now with the stronger model (the most recent open question, including a sentence still being spoken) |
 | `Ctrl+Alt+H` | Show/hide the overlay |
 
 Drag the window anywhere; resize at the bottom right corner.
@@ -69,7 +74,7 @@ Drag the window anywhere; resize at the bottom right corner.
 
 - **Use headphones.** With speakers, your microphone picks up the other participants and everything appears twice in the transcript.
 - **Latency:** expect about 1 to 2 s until the sentence is final plus 1 to 2 s until the first words of the answer. Set `answer_effort = "medium"` for more thorough answers at the cost of speed.
-- **Costs (rough, check current pricing):** two Deepgram streams per call minute (set `capture_mic = false` to halve that); detection with Haiku is a fraction of a cent per question; one Opus answer with a few thousand context tokens costs a few cents.
+- **Costs (rough, check current pricing):** two Deepgram streams per call minute (set `capture_mic = false` to halve that); the Haiku feed costs roughly €0.10-0.20 per call hour; one Opus hotkey answer with a few thousand context tokens costs a few cents. If the cards are too shallow, set `feed_model = "claude-sonnet-5-5"` (roughly €1.5-2 per hour).
 - If an answer request fails with a 400 error mentioning `fallbacks`, set `use_refusal_fallback = false` in `config.toml`.
 
 ## Legal
@@ -83,4 +88,4 @@ pip install -r requirements.txt pytest
 python -m pytest -q
 ```
 
-Module overview: `audio.py` (WASAPI capture), `stt.py` (Deepgram WebSocket), `transcript.py`, `context.py`, `llm.py` (prompts, detector, answer), `engine.py` (asyncio pipeline, simulation), `overlay.py` (PyQt6), `__main__.py` (CLI).
+Module overview: `audio.py` (WASAPI capture), `stt.py` (Deepgram WebSocket), `transcript.py`, `context.py`, `llm.py` (prompts, feed cards, hotkey answer), `engine.py` (asyncio pipeline, simulation), `overlay.py` (PyQt6), `__main__.py` (CLI).

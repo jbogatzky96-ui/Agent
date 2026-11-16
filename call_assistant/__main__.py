@@ -18,24 +18,15 @@ log = logging.getLogger("call_assistant")
 
 
 class ConsoleSink:
-    """UiSink for --no-ui: prints everything to the terminal."""
+    """UiSink for --no-ui. Cards are printed when complete, so a hotkey answer and a feed card never interleave."""
+
+    LABELS = {"question": "FRAGE", "info": "INFO", "answer": "ANTWORT"}
+
+    def __init__(self) -> None:
+        self._cards: dict[int, list[str]] = {}
 
     def status(self, state: str, detail: str = "") -> None:
         log.debug("status %s %s", state, detail)
-
-    def question(self, text: str, trigger: str) -> None:
-        print(f"\n\n>>> [{trigger}] {text}\n", flush=True)
-
-    def answer_delta(self, text: str) -> None:
-        print(text, end="", flush=True)
-
-    def answer_done(self, stats: AnswerStats | None, error: str = "") -> None:
-        if error:
-            print(f"\n[{error}]")
-        elif stats:
-            first = f"{stats.first_token_s:.1f}s" if stats.first_token_s is not None else "-"
-            note = " (abgelehnt)" if stats.refused else ""
-            print(f"\n[{stats.model}, erste Worte nach {first}{note}]\n", flush=True)
 
     def utterance(self, speaker: str, text: str) -> None:
         pass  # already printed by the engine's log
@@ -43,11 +34,22 @@ class ConsoleSink:
     def partial(self, speaker: str, text: str) -> None:
         pass
 
-    def detection(self, text: str, is_question: bool, question: str) -> None:
-        print(f"    -> {'Frage erkannt: ' + question if is_question else 'keine Frage'}", flush=True)
-
     def levels(self, levels: dict[str, float]) -> None:
         pass
+
+    def card_start(self, card_id: int, kind: str, title: str) -> None:
+        self._cards[card_id] = [f"[{self.LABELS.get(kind, kind)}] {title}\n"]
+
+    def card_delta(self, card_id: int, text: str) -> None:
+        self._cards.setdefault(card_id, []).append(text)
+
+    def card_done(self, card_id: int, stats: AnswerStats | None, error: str = "") -> None:
+        text = "".join(self._cards.pop(card_id, []))
+        meta = f"[{error}]" if error else ""
+        if stats:
+            first = f"{stats.first_token_s:.1f}s" if stats.first_token_s is not None else "-"
+            meta = f"[{stats.model}, erste Worte nach {first}{' (abgelehnt)' if stats.refused else ''}]"
+        print(f"\n{'-' * 60}\n{text.strip()}\n{meta}\n{'-' * 60}", flush=True)
 
 
 def register_hotkeys(bindings: dict[str, callable]) -> None:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -27,17 +30,20 @@ class DeepgramConfig:
 
 @dataclass
 class LLMConfig:
+    # Continuous feed: after each new segment of the conversation, one short card (or nothing).
+    feed_enabled: bool = True
+    feed_model: str = "claude-haiku-5-5"
+    feed_effort: str = "low"
+    feed_max_tokens: int = 1500
+    feed_min_words: int = 6  # shorter segments are collected until enough was said (or a "?" appears)
+    feed_on_my_speech: bool = False  # also create cards after you speak
+    feed_transcript_chars: int = 20000
+    # Hotkey: thorough answer with the stronger model.
     answer_model: str = "claude-opus-5-5"
     answer_effort: str = "low"
     answer_max_tokens: int = 4000
-    use_refusal_fallback: bool = True
-    # Only the tail of the transcript is sent; one hour of talk is roughly 50k characters.
     answer_transcript_chars: int = 60000
-    detection_enabled: bool = True
-    detector_model: str = "claude-haiku-5-5"
-    detector_effort: str = "low"
-    detector_window_turns: int = 8
-    min_question_words: int = 3
+    use_refusal_fallback: bool = True
 
 
 @dataclass
@@ -65,9 +71,19 @@ class AppConfig:
     ui: UIConfig = field(default_factory=UIConfig)
 
 
+# Keys from earlier versions; ignored so an old config.toml keeps working.
+REMOVED_KEYS = {
+    "llm.detection_enabled", "llm.detector_model", "llm.detector_effort",
+    "llm.detector_window_turns", "llm.min_question_words",
+}
+
+
 def _apply(target: Any, data: dict[str, Any], path: str = "") -> None:
     known = {f.name: f for f in fields(target)}
     for key, value in data.items():
+        if f"{path}{key}" in REMOVED_KEYS:
+            log.warning("Config key %s%s is no longer used and ignored", path, key)
+            continue
         if key not in known:
             raise ValueError(f"Unknown config key: {path}{key}")
         current = getattr(target, key)

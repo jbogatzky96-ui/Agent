@@ -7,7 +7,7 @@ import pytest
 from call_assistant.config import AppConfig, load_config
 from call_assistant.context import load_context
 from call_assistant.engine import Engine
-from call_assistant.llm import AnswerStats, Assistant, QuestionCheck
+from call_assistant.llm import AnswerStats, Assistant, CardHeader, parse_header
 from call_assistant.stt import UtteranceAssembler, build_url
 from call_assistant.transcript import Transcript
 
@@ -80,19 +80,29 @@ def test_context_puts_briefing_first_and_skips_underscore_files(tmp_path):
 
 
 class FakeAssistant:
-    def __init__(self):
-        self.answers = []
+    """Feed: a FRAGE card when the segment contains '?', INFO when it mentions 'ISO', otherwise SKIP."""
 
-    async def check_question(self, recent):
-        last = recent.splitlines()[-1]
-        await asyncio.sleep(0.01)
-        return QuestionCheck(is_question="?" in last, question=last.split(": ", 1)[1] if "?" in last else "")
+    def __init__(self, delay=0.0):
+        self.delay = delay
+        self.segments = []
+        self.answers = 0
 
-    async def stream_answer(self, transcript, question, trigger):
-        self.answers.append((question, trigger, transcript))
-        for word in ["**Antwort**", " auf ", str(question)]:
-            yield word
+    async def stream_card(self, earlier, segment, recent_cards):
+        self.segments.append(segment)
+        await asyncio.sleep(self.delay)
+        if "?" in segment:
+            yield CardHeader("question", segment.splitlines()[-1].split(": ", 1)[1])
+        elif "ISO" in segment:
+            yield CardHeader("info", "ISO 27001")
+        else:
+            return
+        yield "**Vorschlag**"
         yield AnswerStats("fake", 0.1, 0.2, 10, 0, 3)
+
+    async def stream_answer(self, transcript):
+        self.answers += 1
+        yield "**Ausführlich**"
+        yield AnswerStats("fake-opus", 0.5, 1.0, 10, 0, 3)
 
 
 class RecordingSink:
@@ -102,30 +112,150 @@ class RecordingSink:
     def __getattr__(self, name):
         return lambda *args, **kw: self.events.append((name, args))
 
+    def cards(self):
+        return [args[1:] for name, args in self.events if name == "card_start"]
 
-def test_engine_simulation_answers_detected_questions(tmp_path):
-    script = tmp_path / "sim.txt"
-    script.write_text(
-        "# comment\nthem: Hallo zusammen\nme: Hallo\nthem: Wie hoch war der Umsatz?\npause 0.2\nhotkey\npause 0.2\n",
-        encoding="utf-8",
+
+def run_sim(tmp_path, script, assistant=None, cfg=None):
+    path = tmp_path / "sim.txt"
+    path.write_text(script, encoding="utf-8")
+    assistant, sink = assistant or FakeAssistant(), RecordingSink()
+    asyncio.run(Engine(cfg or AppConfig(), sink, assistant, simulate=path).run())
+    return assistant, sink
+
+
+def test_feed_creates_question_and_info_cards_and_skips_small_talk(tmp_path):
+    fake, sink = run_sim(
+        tmp_path,
+        "them: Hallo zusammen, schön dass es heute klappt\npause 0.2\n"
+        "them: Wir stehen vor der ISO 27001 Zertifizierung im Frühjahr\npause 0.2\n"
+        "them: Wie hoch war der Umsatz?\npause 0.2\nhotkey\npause 0.2\n",
     )
-    cfg = AppConfig()
-    fake, sink = FakeAssistant(), RecordingSink()
-    engine = Engine(cfg, sink, fake, simulate=script)
-    asyncio.run(engine.run())
+    assert sink.cards() == [
+        ("info", "ISO 27001"),
+        ("question", "Wie hoch war der Umsatz?"),
+        ("answer", "Ausführliche Antwort (Hotkey)"),
+    ]
+    assert len(fake.segments) == 3  # small talk was checked too, the model just answered SKIP
+    assert fake.answers == 1
+    done = [args for name, args in sink.events if name == "card_done"]
+    assert len(done) == 3 and all(args[1] is not None for args in done)
 
-    triggers = [(q, t) for q, t, _ in fake.answers]
-    assert ("Wie hoch war der Umsatz?", "auto") in triggers
-    assert (None, "hotkey") in triggers
-    assert "Gegenüber: Wie hoch war der Umsatz?" in fake.answers[0][2]
-    assert any(name == "answer_done" for name, _ in sink.events)
+
+def test_feed_collects_short_utterances_and_ignores_my_speech(tmp_path):
+    fake, _ = run_sim(tmp_path, "them: Ja genau\nme: Das sehe ich auch so, absolut richtig\nthem: und dann noch das Budget\npause 0.2\n")
+    assert len(fake.segments) == 1
+    assert "Ja genau" in fake.segments[0] and "Budget" in fake.segments[0]
 
 
-def test_assistant_builds_cacheable_system_prompt():
-    a = Assistant(AppConfig(), "Doku", client=object())
-    assert a._answer_system[-1]["cache_control"]["type"] == "ephemeral"
-    assert "Doku" in a._answer_system[-1]["text"]
-    assert len(Assistant(AppConfig(), "", client=object())._answer_system) == 1
+def test_feed_batches_utterances_that_arrive_while_a_card_is_generating():
+    fake = FakeAssistant(delay=0.3)
+    engine = Engine(AppConfig(), RecordingSink(), fake)
+
+    async def scenario():
+        feed = asyncio.create_task(engine._feed_loop())
+        for i in range(5):
+            engine._on_utterance("Gegenüber", f"Das ist Satz Nummer {i} mit genug Wörtern")
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(1.0)
+        feed.cancel()
+
+    asyncio.run(scenario())
+    # first sentence starts a card at once; the four that arrive while it runs end up in one or two more
+    assert 1 < len(fake.segments) < 5
+    assert "Nummer 0" in fake.segments[0]
+    joined = "\n".join(fake.segments)
+    assert all(joined.count(f"Nummer {i}") == 1 for i in range(5))
+
+
+def test_parse_header_variants():
+    assert parse_header("FRAGE: Wie hoch ist das Budget?") == CardHeader("question", "Wie hoch ist das Budget?")
+    assert parse_header("**INFO:** ISO 27001") == CardHeader("info", "ISO 27001")
+    assert parse_header("## Frage: Preis") == CardHeader("question", "Preis")
+    assert parse_header("SKIP").kind == "skip"
+    assert parse_header("Der Umsatz lag bei 184.000 €") is None
+
+
+def stream_card_with(chunks):
+    a = Assistant(AppConfig(), "", client=object())
+
+    async def fake_stream(*args, **kwargs):
+        for c in chunks:
+            yield c
+        yield AnswerStats("m", 0.1, 0.2, 1, 0, 1)
+
+    a._stream = fake_stream
+
+    async def collect():
+        return [item async for item in a.stream_card("", "x", [])]
+
+    return asyncio.run(collect())
+
+
+def test_stream_card_splits_header_and_body_across_chunks():
+    items = stream_card_with(["\nFRA", "GE: Budget?\n**Ja", ", 3 %**"])
+    assert items[0] == CardHeader("question", "Budget?")
+    assert "".join(i for i in items if isinstance(i, str)) == "**Ja, 3 %**"
+    assert isinstance(items[-1], AnswerStats)
+
+
+def test_stream_card_skip_yields_nothing_and_unformatted_text_becomes_info():
+    assert stream_card_with(["SKIP"]) == []
+    assert stream_card_with(["SKI", "P\n"]) == []
+    items = stream_card_with(["Einfach ein Hinweis ohne Marker\nzweite Zeile"])
+    assert items[0] == CardHeader("info", "")
+    assert "Einfach ein Hinweis" in "".join(i for i in items if isinstance(i, str))
+
+
+def test_old_config_keys_are_ignored(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text("[llm]\ndetection_enabled = true\ndetector_model = 'x'\nfeed_min_words = 4\n", encoding="utf-8")
+    assert load_config(p).llm.feed_min_words == 4
+
+
+def test_haiku_feed_requests_skip_refusal_fallback():
+    captured = {}
+
+    class FakeStream:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        @property
+        def text_stream(self):
+            async def gen():
+                yield "SKIP"
+            return gen()
+
+        async def get_final_message(self):
+            class U:
+                input_tokens = output_tokens = 1
+                cache_read_input_tokens = cache_creation_input_tokens = 0
+
+            class M:
+                model, stop_reason, usage = "claude-haiku-5-5", "end_turn", U()
+
+            return M()
+
+    class Client:
+        class beta:
+            class messages:
+                stream = FakeStream
+
+    a = Assistant(AppConfig(), "Doku", client=Client())
+
+    async def go():
+        return [i async for i in a.stream_card("", "them: hi", [])]
+
+    assert asyncio.run(go()) == []
+    assert captured["model"] == "claude-haiku-5-5" and "fallbacks" not in captured
+    assert captured["system"][-1]["cache_control"]["type"] == "ephemeral"
+
 
 
 def test_deepgram_stream_against_fake_server(monkeypatch):
@@ -170,33 +300,6 @@ def test_deepgram_stream_against_fake_server(monkeypatch):
     assert received["auth"] == "Token secret"
     assert received["audio"] == b"\x01\x02" * 100
     assert received["keepalive"] >= 2
-
-
-def test_engine_reports_detection_results_and_errors(tmp_path):
-    script = tmp_path / "sim.txt"
-    script.write_text("them: Das ist eine Aussage ohne Frage\nthem: Was kostet das genau?\n", encoding="utf-8")
-    fake, sink = FakeAssistant(), RecordingSink()
-    asyncio.run(Engine(AppConfig(), sink, fake, simulate=script).run())
-    detections = [args for name, args in sink.events if name == "detection"]
-    assert detections == [
-        ("Das ist eine Aussage ohne Frage", False, ""),
-        ("Was kostet das genau?", True, "Was kostet das genau?"),
-    ]
-
-    class Broken(FakeAssistant):
-        async def check_question(self, recent):
-            raise ValueError("boom")
-
-    sink = RecordingSink()
-    asyncio.run(Engine(AppConfig(), sink, Broken(), simulate=script).run())
-    assert any(name == "status" and args[0] == "error" for name, args in sink.events)
-
-
-def test_detector_only_filters_other_addressees_when_name_is_known():
-    assert "named person" not in Assistant(AppConfig(), "", client=object())._detector_system
-    cfg = AppConfig()
-    cfg.my_name = "Jonas"
-    assert "other than Jonas" in Assistant(cfg, "", client=object())._detector_system
 
 
 def test_audio_level_meter_and_decay(monkeypatch):

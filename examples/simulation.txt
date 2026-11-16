@@ -1,11 +1,16 @@
-# Replay with: python -m call_assistant --simulate examples/simulation.txt --context context.example
+# Replay with: run.bat --simulate examples\simulation.txt --context context.example --no-ui
 them: Hallo zusammen, hört ihr mich gut?
 me: Ja, alles klar, wir hören Sie.
 them: Schön. Wir wollten heute über die Verlängerung des Rahmenvertrags sprechen.
+them: Bei uns steht außerdem gerade die ISO 27001 Zertifizierung an, deshalb schauen wir uns alle Dienstleister genauer an.
+pause 4
 them: Wie hat sich denn eigentlich der Umsatz im dritten Quartal bei uns entwickelt?
-pause 8
+pause 4
 me: Der ist ordentlich gestiegen, ich habe gleich die Zahl.
-them: Und wenn wir auf zwei Jahre verlängern, was könnten Sie uns da beim Preis entgegenkommen?
-pause 8
-them: Okay, und dann noch was anderes. Die Migration auf die neue Version, wie viel Aufwand ist das für unsere IT?
-pause 8
+them: Gut. Und wenn wir auf zwei Jahre verlängern, was könnten Sie uns da beim Preis entgegenkommen?
+pause 4
+them: Okay. Dann noch die Migration auf die neue Version.
+them: Unser IT-Leiter meinte, das wird aufwendig.
+pause 4
+hotkey
+pause 6
