@@ -4,17 +4,15 @@ from __future__ import annotations
 from datetime import datetime
 from html import escape
 
-from PyQt6.QtCore import QObject, QPoint, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSizeGrip,
     QSplitter,
     QTextBrowser,
     QVBoxLayout,
@@ -35,7 +33,7 @@ MAX_CARDS = 200
 MAX_TRANSCRIPT_LINES = 300
 
 STYLE = """
-#panel { background: rgba(22, 24, 29, 238); border: 1px solid rgba(255,255,255,30); border-radius: 12px; }
+#panel { background: #16181d; }
 QLabel { color: #e6edf3; }
 #title { color: #8b949e; font-weight: 600; }
 #hint, #meta, #section, #empty { color: #8b949e; }
@@ -44,8 +42,6 @@ QScrollArea, #feed { background: transparent; border: none; }
 QTextBrowser { background: rgba(255,255,255,8); border: none; border-radius: 6px; color: #e6edf3; padding: 4px; }
 QSplitter::handle { background: rgba(255,255,255,25); height: 1px; }
 QProgressBar { background: rgba(255,255,255,20); border: none; border-radius: 3px; max-height: 6px; }
-QPushButton#close { background: transparent; color: #8b949e; border: none; font-size: 15px; padding: 0 4px; }
-QPushButton#close:hover { color: #f85149; }
 QPushButton#jump { background: #58a6ff; color: #0d1117; border: none; border-radius: 10px; padding: 3px 10px;
                    font-weight: 600; }
 QScrollBar:vertical { background: transparent; width: 8px; }
@@ -132,7 +128,6 @@ class Overlay(QWidget):
     def __init__(self, cfg: UIConfig, sink: QtSink) -> None:
         super().__init__()
         self.cfg = cfg
-        self._drag_from: QPoint | None = None
         self._lines: list[str] = []
         self._partials: dict[str, str] = {}
         self._speaker_colors: dict[str, str] = {}
@@ -142,11 +137,11 @@ class Overlay(QWidget):
         self._unseen = 0
 
         self.setWindowTitle("Call Assistant")
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Normal Windows frame: title bar with minimize / maximize / close, resizable at the edges,
+        # taskbar entry so a minimized window can be restored. Stays on top of the call window.
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowOpacity(cfg.opacity)
+        self.setMinimumSize(320, 300)
         self.resize(cfg.width, cfg.height)
         self.setFont(QFont("Segoe UI", cfg.font_size))
         self.setStyleSheet(STYLE)
@@ -164,13 +159,9 @@ class Overlay(QWidget):
         self.dot = QLabel("●")
         self.title = QLabel("Call Assistant", objectName="title")
         self.state_label = QLabel("", objectName="hint")
-        close = QPushButton("×", objectName="close")
-        close.setCursor(Qt.CursorShape.PointingHandCursor)
-        close.clicked.connect(QApplication.instance().quit)
         header.addWidget(self.dot)
         header.addWidget(self.title)
         header.addWidget(self.state_label, 1)
-        header.addWidget(close)
         layout.addLayout(header)
 
         self.meter_row = QHBoxLayout()
@@ -224,11 +215,8 @@ class Overlay(QWidget):
         layout.addWidget(splitter, 1)
 
         footer = QHBoxLayout()
-        self.meta_label = QLabel(
-            f"{cfg.hotkey_toggle.upper()} ein-/ausblenden · am Rand ziehen zum Verschieben", objectName="meta"
-        )
+        self.meta_label = QLabel(f"{cfg.hotkey_toggle.upper()} ein-/ausblenden", objectName="meta")
         footer.addWidget(self.meta_label, 1)
-        footer.addWidget(QSizeGrip(self), 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
         layout.addLayout(footer)
 
         sink.status_sig.connect(self.on_status)
@@ -238,7 +226,7 @@ class Overlay(QWidget):
         sink.card_start_sig.connect(self.on_card_start)
         sink.card_delta_sig.connect(self.on_card_delta)
         sink.card_done_sig.connect(self.on_card_done)
-        sink.toggle_sig.connect(lambda: self.setVisible(not self.isVisible()))
+        sink.toggle_sig.connect(self.toggle)
         self.on_status("listening", "Starte …")
 
     # ---- feed scrolling ------------------------------------------------------------------------
@@ -332,15 +320,12 @@ class Overlay(QWidget):
             # Speech RMS is typically 0.01-0.2; a square-root curve makes quiet input visible.
             self._meters[name].setValue(min(100, int((level ** 0.5) * 220)))
 
-    # ---- dragging ------------------------------------------------------------------------------
+    # ---- window ------------------------------------------------------------------------------
 
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_from = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._drag_from is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_from)
-
-    def mouseReleaseEvent(self, event) -> None:
-        self._drag_from = None
+    def toggle(self) -> None:
+        """Hotkey: hide when visible, otherwise bring back (also from minimized) without stealing focus."""
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self.showNormal()
+            self.raise_()

@@ -128,6 +128,12 @@ def main() -> None:
     from .overlay import Overlay, QtSink
 
     app = QApplication(sys.argv)
+    try:  # Qt 6.8+: dark title bar to match the dark window content (Windows 10/11 dark frame)
+        from PyQt6.QtCore import Qt
+
+        app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+    except AttributeError:
+        pass
     sink = QtSink()
     overlay = Overlay(cfg.ui, sink)
     engine = Engine(cfg, sink, assistant, simulate=args.simulate)

@@ -68,7 +68,7 @@ The card feed scrolls like a chat: new cards appear at the bottom and the view f
 | `Ctrl+Alt+A` | Thorough answer now with the stronger model (the most recent open question, including a sentence still being spoken) |
 | `Ctrl+Alt+H` | Show/hide the overlay |
 
-Drag the window anywhere; resize at the bottom right corner.
+It is a normal Windows window that stays on top: move it by the title bar, resize it at the edges, minimize/maximize/close with the buttons at the top right.
 
 ## Practical notes
 
