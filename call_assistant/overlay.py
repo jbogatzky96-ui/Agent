@@ -4,12 +4,18 @@ from __future__ import annotations
 from datetime import datetime
 from html import escape
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from typing import Callable
+
+from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QFont
 from PyQt6.QtWidgets import (
+    QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -20,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import UIConfig
+from .context import NOTES_NAME, SUPPORTED, ContextStore
 from .llm import AnswerStats
 
 STATUS_COLORS = {"listening": "#3fb950", "answering": "#58a6ff", "error": "#f85149"}
@@ -44,6 +51,8 @@ QSplitter::handle { background: rgba(255,255,255,25); height: 1px; }
 QProgressBar { background: rgba(255,255,255,20); border: none; border-radius: 3px; max-height: 6px; }
 QPushButton#jump { background: #58a6ff; color: #0d1117; border: none; border-radius: 10px; padding: 3px 10px;
                    font-weight: 600; }
+QPushButton#ctx { background: rgba(255,255,255,18); color: #e6edf3; border: none; border-radius: 6px; padding: 3px 9px; }
+QPushButton#ctx:hover { background: rgba(255,255,255,32); }
 QScrollBar:vertical { background: transparent; width: 8px; }
 QScrollBar::handle:vertical { background: rgba(255,255,255,50); border-radius: 4px; min-height: 24px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
@@ -125,10 +134,110 @@ class Card(QFrame):
             self.meta.show()
 
 
+DIALOG_STYLE = """
+QDialog { background: #16181d; }
+QLabel { color: #e6edf3; }
+QLabel#hint { color: #8b949e; }
+QPlainTextEdit, QListWidget { background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; }
+QPushButton { background: rgba(255,255,255,18); color: #e6edf3; border: none; border-radius: 6px; padding: 5px 12px; }
+QPushButton:hover { background: rgba(255,255,255,32); }
+QPushButton#primary { background: #238636; }
+QPushButton#primary:hover { background: #2ea043; }
+"""
+
+
+class ContextDialog(QDialog):
+    """Edit the call context: free text (outline, agenda, notes) plus documents in the context folder."""
+
+    def __init__(self, parent: QWidget, store: ContextStore) -> None:
+        super().__init__(parent)
+        self.store = store
+        self.setWindowTitle("Kontext für diesen Call")
+        self.setStyleSheet(DIALOG_STYLE)
+        self.resize(560, 620)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Gliederung, Agenda oder Notizen</b>"))
+        hint = QLabel(
+            "Einfach einfügen, z. B. die Gliederung, über die gesprochen wird, Ziele, Zahlen, deine Position. "
+            "Der Agent nutzt das für jede Karte und Antwort.",
+            objectName="hint",
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.notes = QPlainTextEdit(store.notes())
+        self.notes.setPlaceholderText("1. Einleitung\n2. Theoretischer Rahmen\n   2.1 ...\n3. Methode\n...")
+        layout.addWidget(self.notes, 3)
+
+        layout.addWidget(QLabel("<b>Dokumente</b> (PDF, Word, Markdown, Text)"))
+        self.files = QListWidget()
+        layout.addWidget(self.files, 1)
+        row = QHBoxLayout()
+        add = QPushButton("Dateien hinzufügen …")
+        add.clicked.connect(self._add_files)
+        remove = QPushButton("Entfernen")
+        remove.clicked.connect(self._remove_selected)
+        folder = QPushButton("Ordner öffnen")
+        folder.clicked.connect(self._open_folder)
+        row.addWidget(add)
+        row.addWidget(remove)
+        row.addWidget(folder)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        tip = QLabel("Tipp: Dateien kannst du auch direkt auf das Hauptfenster ziehen.", objectName="hint")
+        layout.addWidget(tip)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Abbrechen")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Übernehmen", objectName="primary")
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        layout.addLayout(buttons)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self.files.clear()
+        for path in self.store.files():
+            if path.name.lower() != NOTES_NAME:  # edited in the text field above
+                self.files.addItem(path.relative_to(self.store.dir).as_posix())
+
+    def _add_files(self) -> None:
+        patterns = " ".join(f"*{ext}" for ext in sorted(SUPPORTED))
+        paths, _ = QFileDialog.getOpenFileNames(self, "Dokumente hinzufügen", "", f"Dokumente ({patterns})")
+        if paths:
+            self.store.add_files(paths)
+            self._refresh()
+
+    def _remove_selected(self) -> None:
+        for item in self.files.selectedItems():
+            self.store.remove(item.text())
+        self._refresh()
+
+    def _open_folder(self) -> None:
+        self.store.dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.store.dir.resolve())))
+
+    def accept(self) -> None:
+        self.store.save_notes(self.notes.toPlainText())
+        super().accept()
+
+
 class Overlay(QWidget):
-    def __init__(self, cfg: UIConfig, sink: QtSink) -> None:
+    def __init__(
+        self,
+        cfg: UIConfig,
+        sink: QtSink,
+        store: ContextStore | None = None,
+        on_context_changed: Callable[[], str] | None = None,
+    ) -> None:
         super().__init__()
         self.cfg = cfg
+        self.store = store
+        self.on_context_changed = on_context_changed
         self._lines: list[str] = []
         self._partials: dict[str, str] = {}
         self._speaker_colors: dict[str, str] = {}
@@ -163,6 +272,11 @@ class Overlay(QWidget):
         header.addWidget(self.dot)
         header.addWidget(self.title)
         header.addWidget(self.state_label, 1)
+        self.ctx_button = QPushButton("Kontext", objectName="ctx")
+        self.ctx_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ctx_button.clicked.connect(self.open_context_dialog)
+        self.ctx_button.setVisible(store is not None)
+        header.addWidget(self.ctx_button)
         layout.addLayout(header)
 
         self.meter_row = QHBoxLayout()
@@ -229,6 +343,7 @@ class Overlay(QWidget):
         sink.card_done_sig.connect(self.on_card_done)
         sink.toggle_sig.connect(self.toggle)
         self.on_status("listening", "Starte …")
+        self.setAcceptDrops(store is not None)
 
     # ---- feed scrolling ------------------------------------------------------------------------
 
@@ -320,6 +435,41 @@ class Overlay(QWidget):
                 self._meters[name] = bar
             # Speech RMS is typically 0.01-0.2; a square-root curve makes quiet input visible.
             self._meters[name].setValue(min(100, int((level ** 0.5) * 220)))
+
+    # ---- context -----------------------------------------------------------------------------
+
+    def set_context_summary(self, summary: str) -> None:
+        n_files = summary.split(" ", 1)[0]
+        self.ctx_button.setText(f"Kontext ({n_files})")
+        self.ctx_button.setToolTip(f"{summary}\nGliederung, Notizen und Dokumente für diesen Call bearbeiten")
+
+    def _reload_context(self, message: str) -> None:
+        if self.on_context_changed:
+            self.set_context_summary(self.on_context_changed())
+        self.state_label.setText(message)
+
+    def open_context_dialog(self) -> None:
+        if not self.store:
+            return
+        dialog = ContextDialog(self, self.store)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        # files may have been added or removed even when the dialog was cancelled
+        self._reload_context("Kontext aktualisiert" if accepted else "Höre zu")
+
+    def add_context_files(self, paths: list[str]) -> list[str]:
+        added = self.store.add_files(paths) if self.store else []
+        if added:
+            self._reload_context(f"Kontext ergänzt: {', '.join(added)}")
+        return added
+
+    def dragEnterEvent(self, event) -> None:
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if any(u.isLocalFile() and u.toLocalFile().lower().endswith(tuple(SUPPORTED)) for u in urls):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        self.add_context_files([u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()])
+        event.acceptProposedAction()
 
     # ---- window ------------------------------------------------------------------------------
 

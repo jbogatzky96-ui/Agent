@@ -262,7 +262,7 @@ class Engine:
                     continue
                 if not started:
                     started = True
-                    self.ui.card_delta(card_id, "\n\n**▸ Ausführlich:**\n\n")
+                    self.ui.card_delta(card_id, "\n\n**▸ Ausführlich zum Ablesen:**\n\n")
                 self.ui.card_delta(card_id, item)
         except asyncio.CancelledError:
             raise

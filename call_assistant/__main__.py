@@ -11,7 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .config import AppConfig, load_config
-from .context import load_context
+from .context import ContextStore
 from .llm import AnswerStats
 
 log = logging.getLogger("call_assistant")
@@ -110,8 +110,9 @@ def main() -> None:
     cfg = load_config(args.config)
     check_keys(cfg, simulate=args.simulate is not None)
 
-    context_text = load_context(args.context or cfg.context_dir)
-    log.info("Context: %d characters (~%d tokens)", len(context_text), len(context_text) // 4)
+    store = ContextStore(args.context or cfg.context_dir)
+    context_text = store.load()
+    log.info("Context: %d characters (~%d tokens) from %s", len(context_text), len(context_text) // 4, store.dir)
 
     from .engine import Engine
     from .llm import Assistant
@@ -139,7 +140,15 @@ def main() -> None:
     except AttributeError:
         pass
     sink = QtSink()
-    overlay = Overlay(cfg.ui, sink)
+
+    def reload_context() -> str:
+        text = store.load()
+        assistant.set_context(text)
+        log.info("Context reloaded: %d characters (~%d tokens)", len(text), len(text) // 4)
+        return ContextStore.summary(text, len(store.files()))
+
+    overlay = Overlay(cfg.ui, sink, store, reload_context)
+    overlay.set_context_summary(ContextStore.summary(context_text, len(store.files())))
     engine = Engine(cfg, sink, assistant, simulate=args.simulate)
 
     def run_engine() -> None:

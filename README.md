@@ -1,6 +1,6 @@
 # Call Assistant
 
-Listens to a video call from outside (Zoom, Teams, Meet or anything else that plays audio on your PC), transcribes it live in German and keeps a running feed of short cards in a small always-on-top window: a suggested answer when someone asks something (FRAGE), background on topics, terms and numbers that come up (INFO). A hotkey gives you a thorough answer on demand (ANTWORT).
+Listens to a video call from outside (Zoom, Teams, Meet or anything else that plays audio on your PC), transcribes it live in German and keeps a running feed of short cards in a small always-on-top window: an answer you can read out loud when someone asks something (FRAGE), background on topics, terms and numbers that come up (INFO). A hotkey gives you a thorough answer on demand (ANTWORT).
 
 ```
 speakers (loopback) ─┐                         ┌─ live feed after every segment (Claude Haiku 5.5):
@@ -35,6 +35,10 @@ xcopy /E /I context.example context
 API keys: [console.anthropic.com](https://console.anthropic.com) and [console.deepgram.com](https://console.deepgram.com).
 
 ## Before a call: give it context
+
+Easiest way: click **Kontext** at the top of the window. Paste the outline (Gliederung), agenda or notes into the text field and add documents with "Dateien hinzufügen" or by dragging them onto the window. Changes apply immediately, also during a call. The assistant uses an outline to understand which point is being discussed.
+
+Behind the scenes everything lives in the `context/` folder (the text field is saved as `notizen.md`), so you can also manage it directly:
 
 Put everything the assistant should know into `context/`:
 

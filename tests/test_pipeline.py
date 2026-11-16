@@ -157,7 +157,7 @@ def test_question_cards_get_deepened_in_the_same_card(tmp_path):
     assert fake.deepened == [("Wie hoch war der Umsatz?", "**Vorschlag**")]  # only the FRAGE card
     question_id = next(args[0] for name, args in sink.events if name == "card_start" and args[1] == "question")
     deltas = [args[1] for name, args in sink.events if name == "card_delta" and args[0] == question_id]
-    assert deltas == ["**Vorschlag**", "\n\n**▸ Ausführlich:**\n\n", "- Begründung mit Zahl"]
+    assert deltas == ["**Vorschlag**", "\n\n**▸ Ausführlich zum Ablesen:**\n\n", "- Begründung mit Zahl"]
     models = [args[1].model for name, args in sink.events if name == "card_done" and args[0] == question_id]
     assert models == ["fake", "fake-opus"]
 
@@ -344,3 +344,35 @@ def test_audio_level_meter_and_decay(monkeypatch):
     monkeypatch.setattr(audio.time, "monotonic", lambda: 1e12)
     assert cap.level == 0.0
     loop.close()
+
+
+def test_context_store_notes_files_and_order(tmp_path):
+    from call_assistant.context import ContextStore
+
+    ctx = tmp_path / "context"
+    store = ContextStore(ctx)
+    store.save_notes("1. Einleitung\n2. Methode")
+    (ctx / "briefing.md").write_text("Briefing", encoding="utf-8")
+    src = tmp_path / "Gliederung.txt"
+    src.write_text("Kapitel 1", encoding="utf-8")
+    (tmp_path / "bild.png").write_bytes(b"x")
+    assert store.add_files([src, tmp_path / "bild.png"]) == ["Gliederung.txt"]
+
+    text = store.load()
+    assert text.index("briefing.md") < text.index("notizen.md") < text.index("Gliederung.txt")
+    assert store.notes().startswith("1. Einleitung")
+    assert ContextStore.summary(text, len(store.files())) .startswith("3 Dateien")
+
+    store.remove("Gliederung.txt")
+    store.save_notes("   ")
+    assert [p.name for p in store.files()] == ["briefing.md"]
+
+
+def test_assistant_context_can_be_swapped_and_prompts_ask_for_spoken_prose():
+    a = Assistant(AppConfig(), "", client=object())
+    assert len(a._feed_system) == 1
+    a.set_context("Gliederung: 1. Einleitung")
+    for system in (a._feed_system, a._answer_system, a._deepen_system):
+        assert "Gliederung: 1. Einleitung" in system[-1]["text"]
+        assert "read it out loud" in system[0]["text"] and "no lists" in system[0]["text"]
+        assert "outline (Gliederung)" in system[0]["text"]

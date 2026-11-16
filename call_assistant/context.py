@@ -7,6 +7,7 @@ log = logging.getLogger(__name__)
 
 SUPPORTED = {".md", ".txt", ".pdf", ".docx"}
 BRIEFING_NAMES = ("briefing.md", "briefing.txt")
+NOTES_NAME = "notizen.md"
 
 
 def _read(path: Path) -> str:
@@ -36,7 +37,8 @@ def load_context(directory: str | Path) -> str:
 
     files = sorted(
         (p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED and not p.name.startswith("_")),
-        key=lambda p: (p.name.lower() not in BRIEFING_NAMES, str(p).lower()),
+        # briefing first, then the notes typed into the window, then everything else
+        key=lambda p: (p.name.lower() not in BRIEFING_NAMES, p.name.lower() != NOTES_NAME, str(p).lower()),
     )
     parts = []
     for path in files:
@@ -50,3 +52,56 @@ def load_context(directory: str | Path) -> str:
             parts.append(f'<document name="{rel}">\n{text}\n</document>')
             log.info("Context loaded: %s (%d chars)", rel, len(text))
     return "\n\n".join(parts)
+
+
+class ContextStore:
+    """The context folder, plus the operations the window offers: notes text field and adding files."""
+
+    def __init__(self, directory: str | Path) -> None:
+        self.dir = Path(directory)
+
+    def files(self) -> list[Path]:
+        if not self.dir.is_dir():
+            return []
+        return sorted(
+            p for p in self.dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in SUPPORTED and not p.name.startswith("_")
+        )
+
+    def load(self) -> str:
+        return load_context(self.dir)
+
+    def notes(self) -> str:
+        path = self.dir / NOTES_NAME
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def save_notes(self, text: str) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        path = self.dir / NOTES_NAME
+        if text.strip():
+            path.write_text(text.strip() + "\n", encoding="utf-8")
+        elif path.exists():
+            path.unlink()
+
+    def add_files(self, paths: list[str | Path]) -> list[str]:
+        """Copy supported files into the folder; returns the names that were added."""
+        import shutil
+
+        self.dir.mkdir(parents=True, exist_ok=True)
+        added = []
+        for src in map(Path, paths):
+            if src.is_file() and src.suffix.lower() in SUPPORTED:
+                if src.resolve().parent != self.dir.resolve():
+                    shutil.copy2(src, self.dir / src.name)
+                added.append(src.name)
+        return added
+
+    def remove(self, name: str) -> None:
+        path = self.dir / name
+        if path.is_file() and path.resolve().parent == self.dir.resolve():
+            path.unlink()
+
+    @staticmethod
+    def summary(text: str, n_files: int) -> str:
+        words = len(text.split())
+        return f"{n_files} Datei{'en' if n_files != 1 else ''} · ~{words:,} Wörter".replace(",", ".")
